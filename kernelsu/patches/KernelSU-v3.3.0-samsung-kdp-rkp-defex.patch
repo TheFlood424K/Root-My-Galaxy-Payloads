@@ -1038,7 +1038,7 @@ index 8e6f0fe6..83d46eee 100644
  
 +    // Copy the daemon before loading the module changes this process's
 +    // security context. The remaining install steps require KernelSU policy.
-+    utils::stage_daemon_from("/data/local/tmp/.ksud-stage").context("Failed to stage ksud")?;
++    utils::stage_daemon_from("/data/local/tmp/.ksud-stage", None).context("Failed to stage ksud")?;
 +
      // 1. Check if KernelSU is already loaded
      if ksuinit::has_kernelsu() {
@@ -1048,7 +1048,7 @@ index 8e6f0fe6..83d46eee 100644
      }
  
 -    utils::install(None, None).context("Failed to install ksud")?;
-+    utils::finish_install(None, None).context("Failed to finish ksud installation")?;
++    utils::finish_install(None).context("Failed to finish ksud installation")?;
  
      // 5. Handle module updates
      if let Err(e) = handle_updated_modules() {
