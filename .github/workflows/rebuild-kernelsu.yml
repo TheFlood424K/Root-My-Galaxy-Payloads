@@ -213,6 +213,7 @@ jobs:
           path: KernelSU
           submodules: recursive
           fetch-depth: 1
+          lfs: true
 
       - name: Apply Samsung patch
         run: |
