@@ -1160,14 +1160,15 @@ index 0e9ba510..ebc93cbc 100644
      create_daemon_with(use_init_pgrp, || Ok(()))
  }
 diff --git a/userspace/ksud/src/cli.rs b/userspace/ksud/src/cli.rs
-index 831d858a..49ca63d0 100644
+index 49ca63d0..49ca63d0 100644
 --- a/userspace/ksud/src/cli.rs
 +++ b/userspace/ksud/src/cli.rs
-@@ -627,7 +627,7 @@ pub fn run() -> Result<()> {
+@@ -627,8 +627,8 @@ pub fn run() -> Result<()> {
          Commands::Install {
              libadbroot,
-             data_path: _,
+-            data_path,
 -        } => utils::install(libadbroot, data_path),
++            data_path: _,
 +        } => utils::install(libadbroot),
          Commands::Unload => crate::unload::unload(),
          Commands::Uninstall { package_name } => utils::uninstall(&package_name),
