@@ -2,7 +2,28 @@
   "schemaVersion": 3,
   "payloads": [
     {
-      "payloadId": "galaxy-s25-series-2026-06-07",
+      "payloadId": "gts9fewifi-X510XXSEEZG3",
+      "displayName": "Galaxy Tab S9 FE Wi-Fi | Kernel 5.15.189",
+      "models": [
+        "SM-X510"
+      ],
+      "kernelVersions": [
+        "5.15.189"
+      ],
+      "exploit": {
+        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/gts9fewifi-X510XXSEEZG3-v3/artifacts/gts9fewifi-X510XXSEEZG3/cve-2026-43499-app.so",
+        "size": 132192
+      },
+      "kernelsu": {
+        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/gts9fewifi-X510XXSEEZG3-v3/kernelsu/ksud-gts9fewifi-X510XXSEEZG3-kdp",
+        "size": 3828432
+      },
+      "kernelsu-next": {
+        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/gts9fewifi-X510XXSEEZG3-v3/kernelsu/ksud-next-gts9fewifi-X510XXSEEZG3-kdp",
+        "size": 4083520
+      }
+    },
+    {      "payloadId": "galaxy-s25-series-2026-06-07",
       "displayName": "Galaxy S25 series | Kernel 6.6.98",
       "models": [
         "SM-S9310",
