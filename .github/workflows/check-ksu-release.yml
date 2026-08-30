@@ -42,8 +42,8 @@ jobs:
             SHA=$(curl -fsSL "https://api.github.com/repos/tiann/KernelSU/git/tags/${SHA}" \
                   | jq -r '.object.sha')
           fi
-          echo "tag=$TAG"   >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA"   >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "Upstream: $TAG @ $SHA"
 
       - name: Read currently-pinned tag
@@ -72,49 +72,133 @@ jobs:
           (steps.upstream.outputs.tag != steps.pinned.outputs.tag || inputs.force_issue == 'true')
           && steps.existing.outputs.open_count == '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
           NEW_TAG:     ${{ steps.upstream.outputs.tag }}
           NEW_SHA:     ${{ steps.upstream.outputs.sha }}
           CURRENT_TAG: ${{ steps.pinned.outputs.tag }}
         run: |
-          BODY=$(cat <<EOF
-          ## KernelSU $NEW_TAG requires a rebased Samsung patch
+          BODY=$(cat <<'ISSUEEOF'
+          ## KernelSU ${NEW_TAG} requires a rebased Samsung patch
 
-          The upstream [tiann/KernelSU](https://github.com/tiann/KernelSU) has published **$NEW_TAG** (\`$NEW_SHA\`).
-          The binaries in this repo are currently built from **$CURRENT_TAG**.
+          The upstream [tiann/KernelSU](https://github.com/tiann/KernelSU) has published **${NEW_TAG}** (`${NEW_SHA}`).
+          The binaries in this repo are currently built from **${CURRENT_TAG}**.
 
-          The Samsung KDP/RKP/DEFEX patch in \`kernelsu/patches/\` must be manually rebased onto $NEW_TAG before the build workflow can run.
+          The Samsung KDP/RKP/DEFEX patch in `kernelsu/patches/` must be manually rebased onto ${NEW_TAG} before the build workflow can run.
 
-          ### Steps
+          ---
 
-          \`\`\`bash
+          ## Prerequisites
+
+          Install the following before starting. Each installer linked below has a **Next → Next → Finish** default install that works fine.
+
+          | Tool | Download | Notes |
+          |------|----------|-------|
+          | **Git for Windows** | https://git-scm.com/download/win | During setup, choose *"Use Git from the command line and also from 3rd-party software"* |
+          | **GitHub CLI** | https://cli.github.com | Used to push your patch and clone the payloads repo |
+
+          After installing, open a new **PowerShell** window (Win + X → "Windows PowerShell" or "Terminal") and verify:
+
+          ```powershell
+          git --version
+          gh --version
+          ```
+
+          Then authenticate GitHub CLI (one-time):
+
+          ```powershell
+          gh auth login
+          # Choose: GitHub.com → HTTPS → Login with a web browser → follow prompts
+          ```
+
+          ---
+
+          ## Steps
+
+          ### 1 — Clone both repositories
+
+          ```powershell
+          # Pick a working folder (e.g. your Desktop or Documents)
+          cd "$env:USERPROFILE\Desktop"
+
+          # Clone the upstream KernelSU source
           git clone https://github.com/tiann/KernelSU.git
+
+          # Clone the payloads repo
+          gh repo clone TheFlood424K/Root-My-Galaxy-Payloads
+          ```
+
+          ### 2 — Find the current patch file
+
+          ```powershell
+          Get-ChildItem "Root-My-Galaxy-Payloads\kernelsu\patches\*samsung-kdp-rkp-defex.patch"
+          ```
+
+          Note the filename — you'll need it in the next step. It will look like:
+          `KernelSU-${CURRENT_TAG}-samsung-kdp-rkp-defex.patch`
+
+          ### 3 — Recreate the patched branch at the old base
+
+          ```powershell
           cd KernelSU
 
-          # Recreate the patched branch at the old base
-          git checkout $CURRENT_TAG
+          git checkout ${CURRENT_TAG}
           git switch -c samsung-kdp-rebase
-          git apply ../Root-My-Galaxy-Payloads/kernelsu/patches/KernelSU-*-samsung-kdp-rkp-defex.patch
-          git add -A && git commit -m "Samsung KDP/RKP/DEFEX integration ($CURRENT_TAG)"
 
-          # Rebase onto the new tag — resolve conflicts carefully
-          git rebase $NEW_TAG
+          # Apply the existing patch (adjust filename to match what you found above)
+          git apply "..\Root-My-Galaxy-Payloads\kernelsu\patches\KernelSU-${CURRENT_TAG}-samsung-kdp-rkp-defex.patch"
 
-          # Export the reviewed patch
-          git diff $NEW_TAG HEAD \
-            > ../Root-My-Galaxy-Payloads/kernelsu/patches/KernelSU-${NEW_TAG}-samsung-kdp-rkp-defex.patch
-          \`\`\`
+          git add -A
+          git commit -m "Samsung KDP/RKP/DEFEX integration (${CURRENT_TAG})"
+          ```
 
-          Commit the new patch file to \`main\`, then **close this issue**.
-          Closing the issue triggers the rebuild workflow automatically.
+          ### 4 — Rebase onto the new tag
 
-          > **Do not close this issue until the rebased patch has been tested** against at least one representative target per KMI family.
-          EOF
+          ```powershell
+          git rebase ${NEW_TAG}
+          ```
+
+          > **If you see conflicts:** Git will pause and list the conflicting files.
+          > Open each file in a text editor, find the `<<<<<<<` / `=======` / `>>>>>>>` markers, resolve them manually, then run:
+          > ```powershell
+          > git add <conflicted-file>
+          > git rebase --continue
+          > ```
+          > Repeat until the rebase completes. If you get stuck, `git rebase --abort` resets everything.
+
+          ### 5 — Export the new patch
+
+          ```powershell
+          # Still inside the KernelSU folder
+          git diff ${NEW_TAG} HEAD > "..\Root-My-Galaxy-Payloads\kernelsu\patches\KernelSU-${NEW_TAG}-samsung-kdp-rkp-defex.patch"
+          ```
+
+          ### 6 — Commit and push the patch
+
+          ```powershell
+          cd "..\Root-My-Galaxy-Payloads"
+
+          git add "kernelsu\patches\KernelSU-${NEW_TAG}-samsung-kdp-rkp-defex.patch"
+          git commit -m "patch: rebase Samsung KDP/RKP/DEFEX onto KernelSU ${NEW_TAG}"
+          git push
+          ```
+
+          ### 7 — Test, then close this issue
+
+          > **Do not close this issue until the rebased patch has been tested** against at least one representative target per KMI family (android12-5.10, android13-5.15, android14-6.1, android15-6.6).
+
+          Once testing passes, close this issue — that automatically triggers the rebuild workflow.
+          ISSUEEOF
           )
+
+          # Substitute shell variables into the heredoc body
+          BODY=$(echo "$BODY" \
+            | sed "s|\${NEW_TAG}|${NEW_TAG}|g" \
+            | sed "s|\${NEW_SHA}|${NEW_SHA}|g" \
+            | sed "s|\${CURRENT_TAG}|${CURRENT_TAG}|g")
 
           gh issue create \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Rebase Samsung patch onto KernelSU $NEW_TAG" \
+            --title "Rebase Samsung patch onto KernelSU ${NEW_TAG}" \
             --body "$BODY" \
             --label "kernelsu-rebase"
 
