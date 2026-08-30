@@ -1115,7 +1115,7 @@ index 0e9ba510..ebc93cbc 100644
 +    Ok(())
 +}
 +
-+pub fn stage_daemon_from(staged_exe: impl AsRef<Path>, data_path: Option<PathBuf>) -> Result<()> {
++pub fn stage_daemon_from(staged_exe: impl AsRef<Path>, _data_path: Option<PathBuf>) -> Result<()> {
 +    ensure_dir_exists(defs::ADB_DIR)?;
 +
 +    std::fs::rename(staged_exe.as_ref(), defs::DAEMON_PATH).with_context(|| {
@@ -1159,3 +1159,13 @@ index 0e9ba510..ebc93cbc 100644
  pub fn create_daemon(use_init_pgrp: bool) -> Result<bool> {
      create_daemon_with(use_init_pgrp, || Ok(()))
  }
+diff --git a/userspace/ksud/src/cli.rs b/userspace/ksud/src/cli.rs
+index abc1234..def5678 100644
+--- a/userspace/ksud/src/cli.rs
++++ b/userspace/ksud/src/cli.rs
+@@ -627,7 +627,7 @@ pub fn run() -> Result<()> {
+         Commands::Install {
+             libadbroot,
+             data_path: _,
+-        } => utils::install(libadbroot, data_path),
++        } => utils::install(libadbroot),
