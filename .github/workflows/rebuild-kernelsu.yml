@@ -214,52 +214,6 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Patch KernelSU ksud API mismatch (idempotent)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          CLI_RS="KernelSU/userspace/ksud/src/cli.rs"
-          UTILS_RS="KernelSU/userspace/ksud/src/utils.rs"
-
-          # Fix call site — safe to run even if already patched.
-          if grep -q 'utils::install(libadbroot, data_path)' "$CLI_RS" 2>/dev/null; then
-            sed -i 's/utils::install(libadbroot, data_path)/utils::install(libadbroot)/' "$CLI_RS"
-            echo "cli.rs: removed data_path argument from install() call."
-          else
-            echo "cli.rs: call site already clean — skipping."
-          fi
-
-          # Rename unused parameter — safe to run even if already renamed.
-          if grep -q 'data_path: Option<PathBuf>' "$UTILS_RS" 2>/dev/null; then
-            sed -i \
-              's/staged_exe: impl AsRef<Path>, data_path: Option<PathBuf>/staged_exe: impl AsRef<Path>, _data_path: Option<PathBuf>/' \
-              "$UTILS_RS"
-            echo "utils.rs: renamed data_path to _data_path."
-          else
-            echo "utils.rs: parameter already renamed or absent — skipping."
-          fi
-
-          # Remove obsolete KSU_DATA_PATH env var assignment — safe if already gone.
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("KernelSU/userspace/ksud/src/utils.rs")
-          text = path.read_text()
-
-          needle = 'std::env::set_var("KSU_DATA_PATH", data_path);'
-          if needle in text:
-              text = text.replace(needle, "// removed obsolete KSU_DATA_PATH assignment", 1)
-              path.write_text(text)
-              print("utils.rs: removed obsolete KSU_DATA_PATH assignment.")
-          else:
-              print("utils.rs: KSU_DATA_PATH assignment already absent — skipping.")
-          PY
-
-          git -C KernelSU diff -- \
-            userspace/ksud/src/cli.rs \
-            userspace/ksud/src/utils.rs
-
       - name: Apply Samsung patch
         run: |
           PATCH="kernelsu/patches/KernelSU-${{ needs.gate.outputs.ksu_tag }}-samsung-kdp-rkp-defex.patch"
