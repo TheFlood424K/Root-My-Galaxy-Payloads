@@ -174,7 +174,7 @@ index 00000000..f635af65
 +#endif
 diff --git a/kernel/compat/samsung_kdp.c b/kernel/compat/samsung_kdp.c
 new file mode 100644
-index 00000000..b882f099
+index 00000000..9869e6b6
 --- /dev/null
 +++ b/kernel/compat/samsung_kdp.c
 @@ -0,0 +1,204 @@
@@ -207,8 +207,8 @@ index 00000000..b882f099
 +typedef unsigned int (*kdp_usecount_dec_and_test_t)(struct cred *cred);
 +#endif
 +#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-+typedef long (*inc_rlimit_ucounts_t)(struct ucounts *ucounts, enum rlimit_type type, long value);
-+typedef bool (*dec_rlimit_ucounts_t)(struct ucounts *ucounts, enum rlimit_type type, long value);
++typedef long (*inc_rlimit_ucounts_t)(struct ucounts *ucounts, int type, long value);
++typedef bool (*dec_rlimit_ucounts_t)(struct ucounts *ucounts, int type, long value);
 +#endif
 +
 +struct samsung_kdp_commit_work {
