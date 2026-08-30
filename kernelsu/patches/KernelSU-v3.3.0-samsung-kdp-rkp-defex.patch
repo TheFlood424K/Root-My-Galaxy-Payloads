@@ -1148,7 +1148,7 @@ index 0e9ba510..ebc93cbc 100644
  pub fn uninstall(package_name: &str) -> Result<()> {
      if Path::new(defs::MODULE_DIR).exists() {
          println!("- Uninstall modules..");
-@@ -321,10 +354,6 @@ pub fn daemonize_with<F: FnOnce() -> Result<()>>(use_init_pgrp: bool, configure:
+@@ -321,10 +351,4 @@
      Ok(())
  }
  
@@ -1178,7 +1178,9 @@ index 49ca63d0..7f3a1c92 100644
          Commands::Unload => crate::unload::unload(),
          Commands::Uninstall { package_name } => utils::uninstall(&package_name),
          Commands::Sepolicy { command } => match command {
-+            _ => todo!(),
+             Sepolicy::Patch { sepolicy } => crate::sepolicy::live_patch(&sepolicy),
+             Sepolicy::Apply { file } => crate::sepolicy::apply_file(file),
+             Sepolicy::Check { sepolicy } => crate::sepolicy::check_rule(&sepolicy),
          },
      }
  }
