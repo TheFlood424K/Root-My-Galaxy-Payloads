@@ -1178,3 +1178,7 @@ index 49ca63d0..7f3a1c92 100644
          Commands::Unload => crate::unload::unload(),
          Commands::Uninstall { package_name } => utils::uninstall(&package_name),
          Commands::Sepolicy { command } => match command {
++            _ => todo!(),
+         },
+     }
+ }
