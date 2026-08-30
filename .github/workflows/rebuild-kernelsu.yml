@@ -288,10 +288,13 @@ jobs:
           export AR_aarch64_linux_android="${NDK_BIN}/llvm-ar"
           cp "out/${KMI}_kernelsu-${{ matrix.target }}.ko" \
              "KernelSU/userspace/ksud/bin/aarch64/${KMI}_kernelsu.ko"
-          cd KernelSU/userspace/ksud
+          # Run cargo from the workspace root (userspace/) so -p ksud resolves correctly.
+          # Cargo places the target dir at the workspace root, so the binary is at
+          # KernelSU/userspace/target/aarch64-linux-android/release/ksud.
+          cd KernelSU/userspace
           cargo build --release --target aarch64-linux-android -p ksud
           cp target/aarch64-linux-android/release/ksud \
-             "../../../out/ksud-${{ matrix.target }}"
+             "../../out/ksud-${{ matrix.target }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
