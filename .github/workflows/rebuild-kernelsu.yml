@@ -288,11 +288,11 @@ jobs:
           export AR_aarch64_linux_android="${NDK_BIN}/llvm-ar"
           cp "out/${KMI}_kernelsu-${{ matrix.target }}.ko" \
              "KernelSU/userspace/ksud/bin/aarch64/${KMI}_kernelsu.ko"
-          # Build from the workspace root so -p ksud resolves and target/ lands here.
-          # Use absolute paths for cp so there is no ambiguity after cd.
-          cd KernelSU/userspace
+          # Cargo workspace root is KernelSU/ (it has the top-level Cargo.toml).
+          # target/ therefore lands at KernelSU/target/, not KernelSU/userspace/target/.
+          cd KernelSU
           cargo build --release --target aarch64-linux-android -p ksud
-          cp "${GITHUB_WORKSPACE}/KernelSU/userspace/target/aarch64-linux-android/release/ksud" \
+          cp "${GITHUB_WORKSPACE}/KernelSU/target/aarch64-linux-android/release/ksud" \
              "${GITHUB_WORKSPACE}/out/ksud-${{ matrix.target }}"
 
       - name: Upload artifact
