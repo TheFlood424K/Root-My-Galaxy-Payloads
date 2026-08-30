@@ -257,6 +257,11 @@ jobs:
             '
           cp KernelSU/kernel/kernelsu.ko "out/${KMI}_kernelsu-${{ matrix.target }}.ko"
 
+      - name: Install libclang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev llvm-dev
+
       - name: Build ksud
         env:
           KMI:          ${{ matrix.kmi }}
@@ -265,7 +270,7 @@ jobs:
         run: |
           NDK_BIN="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export PATH="${NDK_BIN}:${PATH}"
-          export LIBCLANG_PATH="${NDK_BIN}"
+          export LIBCLANG_PATH="$(llvm-config --libdir)"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK_BIN}/${CARGO_TARGET}-clang"
           export CC_aarch64_linux_android="${NDK_BIN}/${CARGO_TARGET}-clang"
           export AR_aarch64_linux_android="${NDK_BIN}/llvm-ar"
