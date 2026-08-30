@@ -196,7 +196,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android
+          targets: ${{ matrix.cargo_target }}
 
       - name: Install Android NDK
         uses: nttld/setup-ndk@v1
@@ -284,8 +284,8 @@ jobs:
           cp "out/${KMI}_kernelsu-${{ matrix.target }}.ko" \
              "KernelSU/userspace/ksud/bin/aarch64/${KMI}_kernelsu.ko"
           cd KernelSU/userspace/ksud
-          cargo build --release --target aarch64-linux-android -p ksud
-          cp target/aarch64-linux-android/release/ksud \
+          cargo build --release --target "${CARGO_TARGET}" -p ksud
+          cp "target/${CARGO_TARGET}/release/ksud" \
              "../../../out/ksud-${{ matrix.target }}"
 
       - name: Upload artifact
