@@ -11,15 +11,15 @@
         "5.15.189"
       ],
       "exploit": {
-        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/gts9fewifi-X510XXSEEZG3-v3/artifacts/gts9fewifi-X510XXSEEZG3/cve-2026-43499-app.so",
+        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/artifacts/gts9fewifi-X510XXSEEZG3/cve-2026-43499-app.so",
         "size": 132192
       },
       "kernelsu": {
-        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/gts9fewifi-X510XXSEEZG3-v3/kernelsu/ksud-gts9fewifi-X510XXSEEZG3-kdp",
+        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-gts9fewifi-X510XXSEEZG3-kdp",
         "size": 3828432
       },
       "kernelsu-next": {
-        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/gts9fewifi-X510XXSEEZG3-v3/kernelsu/ksud-next-gts9fewifi-X510XXSEEZG3-kdp",
+        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-next-gts9fewifi-X510XXSEEZG3-kdp",
         "size": 4083520
       }
     },
