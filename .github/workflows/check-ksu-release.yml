@@ -92,7 +92,7 @@ jobs:
           Install the following before starting. Each installer linked below has a **Next → Next → Finish** default install that works fine.
 
           | Tool | Download | Notes |
-          |------|----------|-------|
+          |------|----------|---------|
           | **Git for Windows** | https://git-scm.com/download/win | During setup, choose *"Use Git from the command line and also from 3rd-party software"* |
           | **GitHub CLI** | https://cli.github.com | Used to push your patch and clone the payloads repo |
 
@@ -144,12 +144,15 @@ jobs:
           git checkout ${CURRENT_TAG}
           git switch -c samsung-kdp-rebase
 
-          # Apply the existing patch (adjust filename to match what you found above)
-          git apply "..\Root-My-Galaxy-Payloads\kernelsu\patches\KernelSU-${CURRENT_TAG}-samsung-kdp-rkp-defex.patch"
+          # Apply the existing patch using --3way so Git can fall back to a merge
+          # when context lines have shifted between versions
+          git apply --3way "..\Root-My-Galaxy-Payloads\kernelsu\patches\KernelSU-${CURRENT_TAG}-samsung-kdp-rkp-defex.patch"
 
           git add -A
           git commit -m "Samsung KDP/RKP/DEFEX integration (${CURRENT_TAG})"
           ```
+
+          > **Why `--3way`?** Without it, `git apply` rejects the patch the moment any context line doesn't match exactly. The `--3way` flag falls back to a three-way merge for hunks whose context has drifted, giving you a conflict to resolve rather than an outright failure.
 
           ### 4 — Rebase onto the new tag
 
@@ -160,19 +163,42 @@ jobs:
           > **If you see conflicts:** Git will pause and list the conflicting files.
           > Open each file in a text editor, find the `<<<<<<<` / `=======` / `>>>>>>>` markers, resolve them manually, then run:
           > ```powershell
-          > git add <conflicted-file>
+          > git add <resolved-file>
           > git rebase --continue
           > ```
           > Repeat until the rebase completes. If you get stuck, `git rebase --abort` resets everything.
 
-          ### 5 — Export the new patch
+          ### 5 — Verify the patch is not empty
+
+          Before exporting, confirm the rebase actually produced changes:
+
+          ```powershell
+          # Should show a non-zero diff stat — if it's blank, something went wrong above
+          git diff ${NEW_TAG} HEAD --stat
+          ```
+
+          ### 6 — Export the new patch
 
           ```powershell
           # Still inside the KernelSU folder
           git diff ${NEW_TAG} HEAD > "..\Root-My-Galaxy-Payloads\kernelsu\patches\KernelSU-${NEW_TAG}-samsung-kdp-rkp-defex.patch"
           ```
 
-          ### 6 — Commit and push the patch
+          Verify the file has real content:
+
+          ```powershell
+          Get-Item "..\Root-My-Galaxy-Payloads\kernelsu\patches\KernelSU-${NEW_TAG}-samsung-kdp-rkp-defex.patch" | Select-Object Length
+          # Expect tens of KB — if it shows 0, the diff was empty (go back to step 3)
+          ```
+
+          Then do a dry-run apply to confirm CI will accept it:
+
+          ```powershell
+          git apply --check "..\Root-My-Galaxy-Payloads\kernelsu\patches\KernelSU-${NEW_TAG}-samsung-kdp-rkp-defex.patch"
+          # Should exit silently with no errors
+          ```
+
+          ### 7 — Commit and push the patch
 
           ```powershell
           cd "..\Root-My-Galaxy-Payloads"
@@ -182,7 +208,7 @@ jobs:
           git push
           ```
 
-          ### 7 — Test, then close this issue
+          ### 8 — Test, then close this issue
 
           > **Do not close this issue until the rebased patch has been tested** against at least one representative target per KMI family (android12-5.10, android13-5.15, android14-6.1, android15-6.6).
 
