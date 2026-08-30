@@ -253,8 +253,8 @@ jobs:
                 CONFIG_KSU_SAMSUNG_DEFEX=y \
                 KBUILD_MODPOST_WARN=1 modules
               modinfo kernel/kernelsu.ko
+              llvm-strip -d kernel/kernelsu.ko
             '
-          llvm-strip -d KernelSU/kernel/kernelsu.ko
           cp KernelSU/kernel/kernelsu.ko "out/${KMI}_kernelsu-${{ matrix.target }}.ko"
 
       - name: Build ksud
