@@ -236,15 +236,16 @@ jobs:
         run: |
           mkdir -p out
           docker run --rm \
+            -e KERNEL_RELEASE="${KERNEL_RELEASE}" \
             -v "$PWD/KernelSU:/workspace" \
             -w /workspace \
             "$DDK_IMAGE" \
-            bash -lc "
+            bash -lc '
               set -euo pipefail
-              find \$KDIR/include/generated \$KDIR/include/config \
-                -name 'utsrelease.h' -o -name 'kernel.release' 2>/dev/null \
-                | xargs -r sed -i \"s|[0-9][^ \"]*dirty|${KERNEL_RELEASE}|g\"
-              make -C \$KDIR M=\"\$PWD/kernel\" src=\"\$PWD/kernel\" \
+              find "$KDIR/include/generated" "$KDIR/include/config" \
+                \( -name "utsrelease.h" -o -name "kernel.release" \) 2>/dev/null \
+                | xargs -r sed -i "s|[0-9][^ \"]*dirty|${KERNEL_RELEASE}|g"
+              make -C "$KDIR" M="$PWD/kernel" src="$PWD/kernel" \
                 ARCH=arm64 LLVM=1 LLVM_IAS=1 \
                 CONFIG_KSU=m \
                 CONFIG_KSU_SAMSUNG_KDP=y \
@@ -252,7 +253,7 @@ jobs:
                 CONFIG_KSU_SAMSUNG_DEFEX=y \
                 KBUILD_MODPOST_WARN=1 modules
               modinfo kernel/kernelsu.ko
-            "
+            '
           llvm-strip -d KernelSU/kernel/kernelsu.ko
           cp KernelSU/kernel/kernelsu.ko "out/${KMI}_kernelsu-${{ matrix.target }}.ko"
 
