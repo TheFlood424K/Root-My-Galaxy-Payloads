@@ -1160,10 +1160,15 @@ index 0e9ba510..ebc93cbc 100644
      create_daemon_with(use_init_pgrp, || Ok(()))
  }
 diff --git a/userspace/ksud/src/cli.rs b/userspace/ksud/src/cli.rs
-index 49ca63d0..49ca63d0 100644
+index 49ca63d0..7f3a1c92 100644
 --- a/userspace/ksud/src/cli.rs
 +++ b/userspace/ksud/src/cli.rs
-@@ -627,8 +627,8 @@ pub fn run() -> Result<()> {
+@@ -621,14 +621,14 @@ pub fn run() -> Result<()> {
+         Commands::LateLoad {
+             package_name,
+             kmi,
+             allow_shell,
+         } => late_load::run(&package_name, kmi, allow_shell),
          Commands::Install {
              libadbroot,
 -            data_path,
