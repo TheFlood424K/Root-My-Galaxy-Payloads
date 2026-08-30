@@ -1,5 +1,11 @@
 {
   "schemaVersion": 3,
+  "kernelsuManager": {
+    "version": "v3.3.0",
+    "versionCode": 32601,
+    "latestReleaseApiUrl": "https://api.github.com/repos/tiann/KernelSU/releases/latest",
+    "apkUrl": "https://github.com/tiann/KernelSU/releases/download/v3.3.0/KernelSU_v3.3.0_32601-release.apk"
+  },
   "payloads": [
     {
       "payloadId": "galaxy-s25-series-2026-06-07",
