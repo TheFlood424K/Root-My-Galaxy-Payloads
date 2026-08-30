@@ -1,0 +1,131 @@
+# Polls tiann/KernelSU daily for a new release.
+# If a newer tag is found AND no open rebase-needed issue exists,
+# opens a new issue asking for a rebased patch and stops.
+# The rebuild workflow only runs after that issue is closed.
+
+name: Check for new KernelSU release
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force_issue:
+        description: 'Open an issue even if tag matches current (for testing)'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve latest upstream KernelSU tag
+        id: upstream
+        run: |
+          TAG=$(curl -fsSL https://api.github.com/repos/tiann/KernelSU/releases/latest \
+                | jq -r '.tag_name')
+          TYPE=$(curl -fsSL "https://api.github.com/repos/tiann/KernelSU/git/refs/tags/${TAG}" \
+                 | jq -r '.object.type')
+          SHA=$(curl -fsSL "https://api.github.com/repos/tiann/KernelSU/git/refs/tags/${TAG}" \
+                | jq -r '.object.sha')
+          if [ "$TYPE" = "tag" ]; then
+            SHA=$(curl -fsSL "https://api.github.com/repos/tiann/KernelSU/git/tags/${SHA}" \
+                  | jq -r '.object.sha')
+          fi
+          echo "tag=$TAG"   >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"   >> "$GITHUB_OUTPUT"
+          echo "Upstream: $TAG @ $SHA"
+
+      - name: Read currently-pinned tag
+        id: pinned
+        run: |
+          CURRENT=$(grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' kernelsu/README.md | head -1 || echo "none")
+          echo "tag=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "Pinned: $CURRENT"
+
+      - name: Check for existing open rebase issue
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COUNT=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label "kernelsu-rebase" \
+            --json number \
+            --jq 'length')
+          echo "open_count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Open rebase issues: $COUNT"
+
+      - name: Open rebase issue
+        if: |
+          (steps.upstream.outputs.tag != steps.pinned.outputs.tag || inputs.force_issue == 'true')
+          && steps.existing.outputs.open_count == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_TAG:     ${{ steps.upstream.outputs.tag }}
+          NEW_SHA:     ${{ steps.upstream.outputs.sha }}
+          CURRENT_TAG: ${{ steps.pinned.outputs.tag }}
+        run: |
+          BODY=$(cat <<EOF
+          ## KernelSU $NEW_TAG requires a rebased Samsung patch
+
+          The upstream [tiann/KernelSU](https://github.com/tiann/KernelSU) has published **$NEW_TAG** (\`$NEW_SHA\`).
+          The binaries in this repo are currently built from **$CURRENT_TAG**.
+
+          The Samsung KDP/RKP/DEFEX patch in \`kernelsu/patches/\` must be manually rebased onto $NEW_TAG before the build workflow can run.
+
+          ### Steps
+
+          \`\`\`bash
+          git clone https://github.com/tiann/KernelSU.git
+          cd KernelSU
+
+          # Recreate the patched branch at the old base
+          git checkout $CURRENT_TAG
+          git switch -c samsung-kdp-rebase
+          git apply ../Root-My-Galaxy-Payloads/kernelsu/patches/KernelSU-*-samsung-kdp-rkp-defex.patch
+          git add -A && git commit -m "Samsung KDP/RKP/DEFEX integration ($CURRENT_TAG)"
+
+          # Rebase onto the new tag — resolve conflicts carefully
+          git rebase $NEW_TAG
+
+          # Export the reviewed patch
+          git diff $NEW_TAG HEAD \
+            > ../Root-My-Galaxy-Payloads/kernelsu/patches/KernelSU-${NEW_TAG}-samsung-kdp-rkp-defex.patch
+          \`\`\`
+
+          Commit the new patch file to \`main\`, then **close this issue**.
+          Closing the issue triggers the rebuild workflow automatically.
+
+          > **Do not close this issue until the rebased patch has been tested** against at least one representative target per KMI family.
+          EOF
+          )
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Rebase Samsung patch onto KernelSU $NEW_TAG" \
+            --body "$BODY" \
+            --label "kernelsu-rebase"
+
+      - name: Log skip reason
+        if: steps.existing.outputs.open_count != '0'
+        run: |
+          echo "A rebase issue is already open — skipping duplicate."
+
+      - name: Already current
+        if: |
+          steps.upstream.outputs.tag == steps.pinned.outputs.tag
+          && inputs.force_issue != 'true'
+        run: |
+          echo "Already at ${{ steps.pinned.outputs.tag }}, nothing to do."
