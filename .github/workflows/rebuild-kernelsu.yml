@@ -205,27 +205,33 @@ jobs:
           ndk-version: r29
           add-to-path: true
 
-      - name: Checkout KernelSU at target tag
+      - name: Checkout latest KernelSU at target tag
         uses: actions/checkout@v4
         with:
           repository: tiann/KernelSU
           ref: ${{ needs.gate.outputs.ksu_tag }}
           path: KernelSU
+          submodules: recursive
+          fetch-depth: 1
 
       - name: Apply Samsung patch
         run: |
-          # Pick the most recent patch file (named KernelSU-vX.Y.Z-samsung-kdp-rkp-defex.patch)
-          PATCH=$(ls -v kernelsu/patches/KernelSU-*-samsung-kdp-rkp-defex.patch 2>/dev/null | tail -1)
-          if [ -z "$PATCH" ]; then
-            echo "::error::No Samsung patch found in kernelsu/patches/"
+          PATCH="kernelsu/patches/KernelSU-${{ needs.gate.outputs.ksu_tag }}-samsung-kdp-rkp-defex.patch"
+      
+          if [ ! -f "$PATCH" ]; then
+            echo "::error::No Samsung patch exists for KernelSU ${{ needs.gate.outputs.ksu_tag }}."
+            echo "::error::Add or rebase kernelsu/patches/KernelSU-${{ needs.gate.outputs.ksu_tag }}-samsung-kdp-rkp-defex.patch first."
             exit 1
           fi
+      
           echo "Applying $PATCH"
           cd KernelSU
+      
           git apply --check "../$PATCH" || {
-            echo "::error::Patch does not apply cleanly to ${{ needs.gate.outputs.ksu_tag }}. Rebase the patch and re-close the issue."
+            echo "::error::Patch does not apply cleanly to ${{ needs.gate.outputs.ksu_tag }}."
             exit 1
           }
+      
           git apply "../$PATCH"
 
       - name: Build .ko inside DDK container
