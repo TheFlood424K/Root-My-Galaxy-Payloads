@@ -196,7 +196,10 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.cargo_target }}
+          # aarch64-linux-android is the only rustup-distributed std target for Android.
+          # The versioned API-level suffix (android31/33/35) is an NDK clang concept only;
+          # it is used below as the linker binary name, not as a Rust target triple.
+          targets: aarch64-linux-android
 
       - name: Install Android NDK
         uses: nttld/setup-ndk@v1
@@ -278,14 +281,16 @@ jobs:
           NDK_BIN="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export PATH="${NDK_BIN}:${PATH}"
           export LIBCLANG_PATH="$(llvm-config --libdir)"
+          # CARGO_TARGET (e.g. aarch64-linux-android35) selects the versioned NDK clang linker.
+          # The Rust --target is always the unversioned aarch64-linux-android triple.
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK_BIN}/${CARGO_TARGET}-clang"
           export CC_aarch64_linux_android="${NDK_BIN}/${CARGO_TARGET}-clang"
           export AR_aarch64_linux_android="${NDK_BIN}/llvm-ar"
           cp "out/${KMI}_kernelsu-${{ matrix.target }}.ko" \
              "KernelSU/userspace/ksud/bin/aarch64/${KMI}_kernelsu.ko"
           cd KernelSU/userspace/ksud
-          cargo build --release --target "${CARGO_TARGET}" -p ksud
-          cp "target/${CARGO_TARGET}/release/ksud" \
+          cargo build --release --target aarch64-linux-android -p ksud
+          cp target/aarch64-linux-android/release/ksud \
              "../../../out/ksud-${{ matrix.target }}"
 
       - name: Upload artifact
