@@ -1,0 +1,368 @@
+# Rebuilds all ksud/* late-load binaries when a new KernelSU release is published
+# upstream (tiann/KernelSU) and commits them back to main, then updates the
+# size fields in support/targets-v3.json.
+#
+# Triggers:
+#   - schedule: daily poll at 04:00 UTC
+#   - workflow_dispatch: manual run (can override KSU_TAG)
+#   - repository_dispatch: fire from another workflow / webhook with
+#       event_type: ksu-release  (optional: client_payload.tag = "v3.x.y")
+
+name: Rebuild KernelSU binaries
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      ksu_tag:
+        description: 'KernelSU tag to build (leave empty to use latest release)'
+        required: false
+        default: ''
+      force:
+        description: 'Force rebuild even if tag is already current'
+        required: false
+        default: 'false'
+        type: boolean
+  repository_dispatch:
+    types: [ksu-release]
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Step 1: resolve which KernelSU tag we're building ──────────────────────
+  resolve-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      ksu_tag:        ${{ steps.resolve.outputs.ksu_tag }}
+      ksu_commit:     ${{ steps.resolve.outputs.ksu_commit }}
+      current_tag:    ${{ steps.current.outputs.current_tag }}
+      needs_rebuild:  ${{ steps.compare.outputs.needs_rebuild }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve target KernelSU tag
+        id: resolve
+        env:
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          INPUT_TAG:    ${{ inputs.ksu_tag }}
+        run: |
+          TAG="${INPUT_TAG:-${DISPATCH_TAG}}"
+          if [ -z "$TAG" ]; then
+            TAG=$(curl -fsSL https://api.github.com/repos/tiann/KernelSU/releases/latest \
+                  | jq -r '.tag_name')
+          fi
+          COMMIT=$(curl -fsSL "https://api.github.com/repos/tiann/KernelSU/git/refs/tags/${TAG}" \
+                   | jq -r 'if .object.type=="commit" then .object.sha else .object.sha end')
+          # Dereference annotated tag to commit
+          TYPE=$(curl -fsSL "https://api.github.com/repos/tiann/KernelSU/git/refs/tags/${TAG}" \
+                 | jq -r '.object.type')
+          if [ "$TYPE" = "tag" ]; then
+            COMMIT=$(curl -fsSL "https://api.github.com/repos/tiann/KernelSU/git/tags/${COMMIT}" \
+                     | jq -r '.object.sha')
+          fi
+          echo "ksu_tag=$TAG"       >> "$GITHUB_OUTPUT"
+          echo "ksu_commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Resolved: $TAG @ $COMMIT"
+
+      - name: Read currently-pinned tag from README
+        id: current
+        run: |
+          # Extract the version string from the first line that mentions a tag
+          CURRENT=$(grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' kernelsu/README.md | head -1 || echo "none")
+          echo "current_tag=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "Currently pinned: $CURRENT"
+
+      - name: Decide whether to rebuild
+        id: compare
+        env:
+          FORCE:   ${{ inputs.force }}
+          NEW_TAG: ${{ steps.resolve.outputs.ksu_tag }}
+          OLD_TAG: ${{ steps.current.outputs.current_tag }}
+        run: |
+          if [ "$FORCE" = "true" ] || [ "$NEW_TAG" != "$OLD_TAG" ]; then
+            echo "needs_rebuild=true" >> "$GITHUB_OUTPUT"
+            echo "Will rebuild: $OLD_TAG -> $NEW_TAG"
+          else
+            echo "needs_rebuild=false" >> "$GITHUB_OUTPUT"
+            echo "Already at $NEW_TAG, skipping."
+          fi
+
+  # ── Step 2: build all targets in parallel ──────────────────────────────────
+  build:
+    needs: resolve-tag
+    if: needs.resolve-tag.outputs.needs_rebuild == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # android15-6.6 targets
+          - target: s25u-kdp
+            kmi: android15-6.6
+            ddk_image: ghcr.io/ylarod/ddk-min:android15-6.6-20260313
+            kernel_release: 6.6.98-android15-8
+            cargo_target: aarch64-linux-android35
+          - target: A566EXXSCCZG6-kdp
+            kmi: android15-6.6
+            ddk_image: ghcr.io/ylarod/ddk-min:android15-6.6-20260313
+            kernel_release: 6.6.102-android15-8
+            cargo_target: aarch64-linux-android35
+          - target: A366WVLS3AYG1-kdp
+            kmi: android15-6.6
+            ddk_image: ghcr.io/ylarod/ddk-min:android15-6.6-20260313
+            kernel_release: 6.6.46-android15-8
+            cargo_target: aarch64-linux-android35
+          # android14-6.1 targets
+          - target: e3q-S928USQS6DZF2-kdp
+            kmi: android14-6.1
+            ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
+            kernel_release: 6.1.145-android14-11-33419968-abS928USQS6DZF2
+            cargo_target: aarch64-linux-android35
+          - target: e3q-S928BXXS6DZF2-kdp
+            kmi: android14-6.1
+            ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
+            kernel_release: 6.1.145-android14-11
+            cargo_target: aarch64-linux-android35
+          - target: e2s-S926BXXUEDZDR-kdp
+            kmi: android14-6.1
+            ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
+            kernel_release: 6.1.157-android14-11
+            cargo_target: aarch64-linux-android35
+          - target: e1s-S921BXXSFDZE1-kdp
+            kmi: android14-6.1
+            ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
+            kernel_release: 6.1.157-android14-11
+            cargo_target: aarch64-linux-android35
+          - target: e1s-S921NKSSFDZF3-kdp
+            kmi: android14-6.1
+            ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
+            kernel_release: 6.1.157-android14-11
+            cargo_target: aarch64-linux-android35
+          # android13-5.15 targets
+          - target: dm3q-S9180ZHS8FZF5-kdp
+            kmi: android13-5.15
+            ddk_image: ghcr.io/ylarod/ddk-min:android13-5.15-20260313
+            kernel_release: 5.15.189-android13-8
+            cargo_target: aarch64-linux-android33
+          - target: dm3q-S918BXXSAFZF5-kdp
+            kmi: android13-5.15
+            ddk_image: ghcr.io/ylarod/ddk-min:android13-5.15-20260313
+            kernel_release: 5.15.189-android13-8
+            cargo_target: aarch64-linux-android33
+          - target: dm1q-S911U1UES6DYI3-kdp
+            kmi: android13-5.15
+            ddk_image: ghcr.io/ylarod/ddk-min:android13-5.15-20260313
+            kernel_release: 5.15.153-android13-8
+            cargo_target: aarch64-linux-android33
+          # android12-5.10 targets
+          - target: A536EXXSNGZG3-kdp
+            kmi: android12-5.10
+            ddk_image: ghcr.io/ylarod/ddk-min:android12-5.10-20260313
+            kernel_release: 5.10.237-android12-9
+            cargo_target: aarch64-linux-android31
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Rust (stable, aarch64-linux-android)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29
+          add-to-path: true
+
+      - name: Checkout KernelSU at target tag
+        uses: actions/checkout@v4
+        with:
+          repository: tiann/KernelSU
+          ref: ${{ needs.resolve-tag.outputs.ksu_tag }}
+          path: KernelSU
+
+      - name: Apply Samsung patch
+        env:
+          KMI: ${{ matrix.kmi }}
+        run: |
+          # Select the correct patch for this KMI
+          PATCH=$(ls kernelsu/patches/KernelSU-*-samsung-kdp-rkp-defex.patch 2>/dev/null | head -1)
+          if [ -z "$PATCH" ]; then
+            echo "::error::No Samsung patch found in kernelsu/patches/"
+            exit 1
+          fi
+          cd KernelSU
+          git apply "../$PATCH" || {
+            echo "::warning::Patch did not apply cleanly — manual intervention required for ${{ matrix.target }}"
+            exit 1
+          }
+
+      - name: Build kernel module (.ko) inside DDK container
+        env:
+          KMI:            ${{ matrix.kmi }}
+          KERNEL_RELEASE: ${{ matrix.kernel_release }}
+          TARGET:         ${{ matrix.target }}
+          DDK_IMAGE:      ${{ matrix.ddk_image }}
+        run: |
+          mkdir -p out
+          docker run --rm \
+            -v "$PWD/KernelSU:/workspace" \
+            -w /workspace \
+            "$DDK_IMAGE" \
+            bash -lc "
+              set -euo pipefail
+              # Stamp the exact target kernel release string into the DDK headers
+              find \$KDIR/include/generated \$KDIR/include/config \
+                -name 'utsrelease.h' -o -name 'kernel.release' 2>/dev/null \
+                | xargs -r sed -i \"s|[0-9][^ \"]*dirty|${KERNEL_RELEASE}|g\"
+              make -C \$KDIR M=\"\$PWD/kernel\" src=\"\$PWD/kernel\" \
+                ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                CONFIG_KSU=m \
+                CONFIG_KSU_SAMSUNG_KDP=y \
+                CONFIG_KSU_SAMSUNG_RKP=y \
+                CONFIG_KSU_SAMSUNG_DEFEX=y \
+                KBUILD_MODPOST_WARN=1 modules
+              modinfo kernel/kernelsu.ko
+            "
+          llvm-strip -d KernelSU/kernel/kernelsu.ko
+          cp KernelSU/kernel/kernelsu.ko \
+             "out/${KMI}_kernelsu-${TARGET}.ko"
+
+      - name: Build ksud userspace binary
+        env:
+          TARGET:         ${{ matrix.target }}
+          KMI:            ${{ matrix.kmi }}
+          CARGO_TARGET:   ${{ matrix.cargo_target }}
+          ANDROID_NDK:    ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          NDK_BIN="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="${NDK_BIN}:${PATH}"
+          export LIBCLANG_PATH="${NDK_BIN}"
+          export "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK_BIN}/${CARGO_TARGET}-clang"
+          export "CC_aarch64_linux_android=${NDK_BIN}/${CARGO_TARGET}-clang"
+          export "AR_aarch64_linux_android=${NDK_BIN}/llvm-ar"
+
+          # Drop the target .ko into the ksud asset directory
+          cp "out/${KMI}_kernelsu-${TARGET}.ko" \
+             "KernelSU/userspace/ksud/bin/aarch64/${KMI}_kernelsu.ko"
+
+          cd KernelSU/userspace/ksud
+          cargo build --release --target aarch64-linux-android -p ksud
+          cp "target/aarch64-linux-android/release/ksud" \
+             "../../../out/ksud-${TARGET}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ksud-${{ matrix.target }}
+          path: |
+            out/ksud-${{ matrix.target }}
+            out/${{ matrix.kmi }}_kernelsu-${{ matrix.target }}.ko
+          retention-days: 7
+
+  # ── Step 3: collect artifacts, update repo ─────────────────────────────────
+  commit:
+    needs: [resolve-tag, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts-dl
+          merge-multiple: true
+
+      - name: Install files and update metadata
+        env:
+          KSU_TAG:    ${{ needs.resolve-tag.outputs.ksu_tag }}
+          KSU_COMMIT: ${{ needs.resolve-tag.outputs.ksu_commit }}
+        run: |
+          set -euo pipefail
+
+          # Copy binaries into the repo's kernelsu/ directory
+          for f in artifacts-dl/ksud-*; do
+            name=$(basename "$f")
+            cp "$f" "kernelsu/${name}"
+            echo "Updated kernelsu/${name} ($(stat -c %s kernelsu/${name}) bytes)"
+          done
+          for f in artifacts-dl/*.ko; do
+            name=$(basename "$f")
+            cp "$f" "kernelsu/${name}"
+            echo "Updated kernelsu/${name} ($(stat -c %s kernelsu/${name}) bytes)"
+          done
+
+          # Update the pinned-version line in kernelsu/README.md
+          sed -i \
+            "s|KernelSU \`v[0-9]\+\.[0-9]\+\.[0-9]\+\`, commit|KernelSU \`${KSU_TAG}\`, commit|" \
+            kernelsu/README.md
+          sed -i \
+            "s|\`[0-9a-f]\{40\}\`|\`${KSU_COMMIT}\`|" \
+            kernelsu/README.md
+
+          # Update size fields in support/targets-v3.json using Python
+          python3 - <<'PYEOF'
+          import json, os
+
+          with open("support/targets-v3.json") as f:
+              data = json.load(f)
+
+          base = "kernelsu"
+          changed = []
+          for payload in data["payloads"]:
+              ksu = payload.get("kernelsu", {})
+              url = ksu.get("url", "")
+              fname = url.split("/")[-1]   # e.g. "ksud-s25u-kdp"
+              local = os.path.join(base, fname)
+              if os.path.isfile(local):
+                  new_size = os.path.getsize(local)
+                  if ksu.get("size") != new_size:
+                      changed.append(f"  {fname}: {ksu.get('size')} -> {new_size}")
+                      ksu["size"] = new_size
+
+          # Update kernelsuManager block
+          import urllib.request, re
+          meta = json.loads(urllib.request.urlopen(
+              "https://api.github.com/repos/tiann/KernelSU/releases/latest"
+          ).read())
+          apk = next((a for a in meta["assets"] if a["name"].endswith("-release.apk")), None)
+          if apk:
+              data["kernelsuManager"] = {
+                  "version":             meta["tag_name"],
+                  "versionCode":         int(re.search(r'_(\d+)-release', apk["name"]).group(1)),
+                  "latestReleaseApiUrl": "https://api.github.com/repos/tiann/KernelSU/releases/latest",
+                  "apkUrl":              apk["browser_download_url"],
+              }
+
+          with open("support/targets-v3.json", "w") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+
+          for line in changed:
+              print(line)
+          PYEOF
+
+      - name: Commit and push
+        env:
+          KSU_TAG: ${{ needs.resolve-tag.outputs.ksu_tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add kernelsu/ support/targets-v3.json
+          if git diff --cached --quiet; then
+            echo "Nothing changed, skipping commit."
+          else
+            git commit -m "chore: rebuild KernelSU binaries for ${KSU_TAG}"
+            git push
+          fi
