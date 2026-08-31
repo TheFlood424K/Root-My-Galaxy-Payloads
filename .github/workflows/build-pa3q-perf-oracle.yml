@@ -114,10 +114,18 @@ jobs:
 
       - name: Verify artifact size
         run: |
-          EXPECTED=133344
+          EXPECTED=$(python3 -c "
+import json
+with open('support/targets-v3.json') as f:
+    data = json.load(f)
+for p in data['payloads']:
+    if p.get('payloadId') == 'pa3q-S938NKSUACZF1-perf':
+        print(p['exploit']['size'])
+        break
+")
           ACTUAL=$(stat -c %s build/pa3q/cve-2026-43499-app.so)
-          echo "Expected: ${EXPECTED} bytes"
-          echo "Actual:   ${ACTUAL} bytes"
+          echo "Expected (from targets-v3.json): ${EXPECTED} bytes"
+          echo "Actual:                          ${ACTUAL} bytes"
           if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "::warning::Artifact size ${ACTUAL} does not match targets-v3.json size ${EXPECTED} — update exploit.size if intentional."
           else
