@@ -252,12 +252,27 @@ jobs:
           WS="${GITHUB_WORKSPACE}"
           PATCH="${WS}/kernelsu/patches/KernelSU-${KSU_TAG}-samsung-kdp-rkp-defex.patch"
 
+          # ── Helper: check if the Samsung compat files are already present
+          # in the checked-out KernelSU source (i.e. merged upstream).
+          samsung_already_merged() {
+            [ -f "${WS}/KernelSU/kernel/compat/samsung_kdp.c" ] && \
+            [ -f "${WS}/KernelSU/kernel/compat/samsung_defex.c" ]
+          }
+
           if [ ! -f "${PATCH}" ] || [ ! -s "${PATCH}" ]; then
             echo "No valid patch for ${KSU_TAG} — attempting auto-generation from previous version."
 
-            # Find the most recent existing patch (by version sort)
+            # If Samsung changes are already present upstream, no patch is needed.
+            if samsung_already_merged; then
+              echo "Samsung KDP/RKP/DEFEX already merged in ${KSU_TAG} — creating empty sentinel patch."
+              touch "${PATCH}"
+              echo "Nothing to apply — sentinel written to ${PATCH}"
+              exit 0
+            fi
+
+            # Find the most recent existing non-empty patch (by version sort)
             PREV_PATCH=$(ls -1 "${WS}/kernelsu/patches/KernelSU-v"*"-samsung-kdp-rkp-defex.patch" \
-              2>/dev/null | sort -V | tail -1)
+              2>/dev/null | xargs -r grep -l . | sort -V | tail -1)
 
             if [ -z "${PREV_PATCH}" ]; then
               echo "::error::No previous Samsung patch found to rebase from."
@@ -276,9 +291,26 @@ jobs:
             if patch -p1 --forward --reject-file=- < "${PREV_PATCH}"; then
               echo "Patch applied cleanly to ${KSU_TAG}."
             else
+              # patch returned non-zero — check if it was because everything was
+              # already applied (all hunks "reversed or previously applied").
+              PATCH_OUT=$(patch -p1 --forward --dry-run < "${PREV_PATCH}" 2>&1 || true)
+              FAILED_HUNKS=$(echo "${PATCH_OUT}" | grep -c "FAILED" || true)
+              REVERSED=$(echo "${PATCH_OUT}" | grep -c "Reversed\|already exists" || true)
+              TOTAL_HUNKS=$(echo "${PATCH_OUT}" | grep -c "Hunk\|patching" || true)
+
+              if [ "${FAILED_HUNKS}" -eq 0 ] && [ "${REVERSED}" -gt 0 ]; then
+                echo "All hunks already applied in ${KSU_TAG} (upstream merge detected)."
+                echo "Creating empty sentinel patch."
+                git checkout -- .
+                touch "${PATCH}"
+                cd "${WS}"
+                echo "Nothing to apply — sentinel written to ${PATCH}"
+                exit 0
+              fi
+
               echo "::error::Previous patch did not apply cleanly to ${KSU_TAG}."
               echo "Reject hunks:"
-              patch -p1 --forward --dry-run < "${PREV_PATCH}" 2>&1 || true
+              echo "${PATCH_OUT}"
               exit 1
             fi
 
@@ -288,6 +320,12 @@ jobs:
             cd "${WS}"
 
             echo "Generated patch saved to ${PATCH}"
+          fi
+
+          # ── Apply the versioned patch (skip if sentinel / empty) ──────────
+          if [ ! -s "${PATCH}" ]; then
+            echo "Sentinel patch for ${KSU_TAG} — Samsung changes already upstream, nothing to apply."
+            exit 0
           fi
 
           echo "Applying ${PATCH} to KernelSU ${KSU_TAG}"
