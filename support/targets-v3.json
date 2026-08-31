@@ -65,7 +65,7 @@
       "requiresFreshP0Session": true,
       "exploit": {
         "url": "https://raw.githubusercontent.com/TheFlood424K/Root-My-Galaxy-Payloads/main/artifacts/pa3q-S938NKSUACZF1-perf/cve-2026-43499-app.so",
-        "size": 105240
+        "size": 125112
       },
       "kernelsu": {
         "url": "https://raw.githubusercontent.com/TheFlood424K/Root-My-Galaxy-Payloads/main/kernelsu/ksud-s25u-kdp",
