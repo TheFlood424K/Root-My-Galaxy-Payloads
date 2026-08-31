@@ -33,7 +33,6 @@
         "SM-S937W",
         "SM-S9380",
         "SM-S938B",
-        "SM-S938N",
         "SM-S938Q",
         "SM-S938U",
         "SM-S938U1",
@@ -48,6 +47,25 @@
       "exploit": {
         "url": "https://raw.githubusercontent.com/TheFlood424K/Root-My-Galaxy-Payloads/main/artifacts/pa3q-S938NKSUACZF1/cve-2026-43499-app.so",
         "size": 104128
+      },
+      "kernelsu": {
+        "url": "https://raw.githubusercontent.com/TheFlood424K/Root-My-Galaxy-Payloads/main/kernelsu/ksud-s25u-kdp",
+        "size": 4976104
+      }
+    },
+    {
+      "payloadId": "pa3q-S938NKSUACZF1-perf",
+      "displayName": "Galaxy S25 Ultra (SM-S938N) | Kernel 6.6.98 | perf oracle",
+      "models": [
+        "SM-S938N"
+      ],
+      "kernelVersions": [
+        "6.6.98"
+      ],
+      "requiresFreshP0Session": true,
+      "exploit": {
+        "url": "https://raw.githubusercontent.com/TheFlood424K/Root-My-Galaxy-Payloads/main/artifacts/pa3q-S938NKSUACZF1-perf/cve-2026-43499-app.so",
+        "size": 133344
       },
       "kernelsu": {
         "url": "https://raw.githubusercontent.com/TheFlood424K/Root-My-Galaxy-Payloads/main/kernelsu/ksud-s25u-kdp",
