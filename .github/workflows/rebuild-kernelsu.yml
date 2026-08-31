@@ -267,24 +267,31 @@ jobs:
             PREV_TAG=$(basename "${PREV_PATCH}" | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+')
             echo "Rebasing from ${PREV_TAG} patch: ${PREV_PATCH}"
 
-            # Checkout the previous tag into a sibling directory
+            # Strip `index <old>..<new>` lines so git apply uses pure context
+            # matching rather than trying to locate blob SHAs from the old tag
+            # in the new tag's object store (which would fail with no rejects).
+            STRIPPED_PATCH="${WS}/prev-patch-stripped.patch"
+            grep -v '^index ' "${PREV_PATCH}" > "${STRIPPED_PATCH}"
+
+            # Checkout the previous tag into a sibling directory and verify
+            # the stripped patch still applies to it cleanly.
             git -C "${WS}/KernelSU" worktree add "${WS}/KernelSU-prev" "${PREV_TAG}" 2>/dev/null \
               || git clone --depth=1 --branch "${PREV_TAG}" \
                    https://github.com/tiann/KernelSU.git "${WS}/KernelSU-prev"
 
-            # Verify the previous patch still applies cleanly to its own base tag
             git -C "${WS}/KernelSU-prev" submodule update --init --recursive 2>/dev/null || true
-            git -C "${WS}/KernelSU-prev" apply "${PREV_PATCH}" || {
-              echo "::error::Previous patch does not apply to ${PREV_TAG} — manual intervention needed."
+            git -C "${WS}/KernelSU-prev" apply "${STRIPPED_PATCH}" || {
+              echo "::error::Previous patch does not apply to ${PREV_TAG} even after stripping index lines — manual intervention needed."
               exit 1
             }
 
-            # Apply the previous patch onto the new tag with 3-way merge,
+            # Apply the stripped patch onto the new tag with 3-way merge,
             # then capture the result as the new versioned patch.
-            git -C "${WS}/KernelSU" apply --3way "${PREV_PATCH}" 2>/dev/null || {
+            git -C "${WS}/KernelSU" apply --3way "${STRIPPED_PATCH}" 2>/dev/null || {
               echo "::error::Previous patch did not apply cleanly to ${KSU_TAG} even with --3way."
               echo "Reject files:"
               find "${WS}/KernelSU" -name '*.rej' | head -20
+              cat $(find "${WS}/KernelSU" -name '*.rej' | head -5) 2>/dev/null || true
               exit 1
             }
             git -C "${WS}/KernelSU" diff HEAD > "${PATCH}"
@@ -294,11 +301,14 @@ jobs:
           fi
 
           echo "Applying ${PATCH}"
-          git -C "${WS}/KernelSU" apply --check "${PATCH}" || {
+          # Strip index lines here too so the final apply is also context-only
+          APPLY_PATCH="${WS}/apply-patch-stripped.patch"
+          grep -v '^index ' "${PATCH}" > "${APPLY_PATCH}"
+          git -C "${WS}/KernelSU" apply --check "${APPLY_PATCH}" || {
             echo "::error::Patch does not apply cleanly to ${KSU_TAG}."
             exit 1
           }
-          git -C "${WS}/KernelSU" apply "${PATCH}"
+          git -C "${WS}/KernelSU" apply "${APPLY_PATCH}"
 
       - name: Build .ko inside DDK container
         env:
