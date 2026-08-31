@@ -278,23 +278,45 @@ jobs:
           WS="${GITHUB_WORKSPACE}"
           PATCH="${WS}/kernelsu/patches/KernelSU-${KSU_TAG}-samsung-kdp-rkp-defex.patch"
 
-          # ── Helper: check if the Samsung compat files are already present
-          # in the checked-out KernelSU source (i.e. merged upstream).
-          samsung_already_merged() {
-            [ -f "${WS}/KernelSU/kernel/compat/samsung_kdp.c" ] && \
-            [ -f "${WS}/KernelSU/kernel/compat/samsung_defex.c" ]
+          # ── Helper: use patch --dry-run to determine whether the previous
+          # patch is already fully applied in the new KernelSU tree.
+          #
+          # Returns:
+          #   0  → all hunks are already applied (upstream merged)
+          #   1  → patch applies cleanly (needs to be applied)
+          #   2  → one or more hunks FAILED (hard error, do not skip)
+          samsung_upstream_status() {
+            local prev_patch="$1"
+            local dry_out
+            dry_out=$(patch -p1 --forward --dry-run < "${prev_patch}" 2>&1 || true)
+
+            local failed reversed
+            failed=$(echo "${dry_out}"  | grep -c "FAILED" || true)
+            reversed=$(echo "${dry_out}" | grep -c "Reversed\|already exists\|previously applied" || true)
+            local total_hunks
+            total_hunks=$(echo "${dry_out}" | grep -c "^Hunk\|^patching file" || true)
+
+            echo "::debug::samsung_upstream_status failed=${failed} reversed=${reversed} total=${total_hunks}"
+
+            if [ "${failed}" -gt 0 ]; then
+              echo "::error::Samsung patch has ${failed} FAILED hunk(s) against ${KSU_TAG} — cannot auto-skip."
+              echo "Dry-run output:"
+              echo "${dry_out}"
+              return 2
+            fi
+
+            if [ "${reversed}" -gt 0 ] && [ "${failed}" -eq 0 ]; then
+              # All hunks were either already applied or reversed — upstream merged.
+              echo "All ${total_hunks} hunk(s) already present in ${KSU_TAG} (upstream merge confirmed)."
+              return 0
+            fi
+
+            # Patch applies cleanly — needs to be applied.
+            return 1
           }
 
           if [ ! -f "${PATCH}" ] || [ ! -s "${PATCH}" ]; then
             echo "No valid patch for ${KSU_TAG} — attempting auto-generation from previous version."
-
-            # If Samsung changes are already present upstream, no patch is needed.
-            if samsung_already_merged; then
-              echo "Samsung KDP/RKP/DEFEX already merged in ${KSU_TAG} — creating empty sentinel patch."
-              touch "${PATCH}"
-              echo "Nothing to apply — sentinel written to ${PATCH}"
-              exit 0
-            fi
 
             # Find the most recent existing non-empty patch (by version sort)
             PREV_PATCH=$(ls -1 "${WS}/kernelsu/patches/KernelSU-v"*"-samsung-kdp-rkp-defex.patch" \
@@ -306,45 +328,38 @@ jobs:
             fi
 
             PREV_TAG=$(basename "${PREV_PATCH}" | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+')
-            echo "Rebasing from ${PREV_TAG} patch: ${PREV_PATCH}"
+            echo "Checking previous patch (${PREV_TAG}) against ${KSU_TAG}: ${PREV_PATCH}"
 
-            # Use `patch -p1` instead of `git apply` so blob-SHA `index` lines
-            # are ignored entirely. git apply uses those SHAs as a 3-way merge
-            # base; when they don't exist in the new tag's object store it fails
-            # silently (no .rej files). `patch -p1` always does context-only
-            # matching and handles new-file creation via --- /dev/null headers.
             cd "${WS}/KernelSU"
-            if patch -p1 --forward --reject-file=- < "${PREV_PATCH}"; then
-              echo "Patch applied cleanly to ${KSU_TAG}."
-            else
-              # patch returned non-zero — check if it was because everything was
-              # already applied (all hunks "reversed or previously applied").
-              PATCH_OUT=$(patch -p1 --forward --dry-run < "${PREV_PATCH}" 2>&1 || true)
-              FAILED_HUNKS=$(echo "${PATCH_OUT}" | grep -c "FAILED" || true)
-              REVERSED=$(echo "${PATCH_OUT}" | grep -c "Reversed\|already exists" || true)
-              TOTAL_HUNKS=$(echo "${PATCH_OUT}" | grep -c "Hunk\|patching" || true)
+            samsung_upstream_status "${PREV_PATCH}"
+            STATUS=$?
 
-              if [ "${FAILED_HUNKS}" -eq 0 ] && [ "${REVERSED}" -gt 0 ]; then
-                echo "All hunks already applied in ${KSU_TAG} (upstream merge detected)."
-                echo "Creating empty sentinel patch."
-                git checkout -- .
-                touch "${PATCH}"
-                cd "${WS}"
-                echo "Nothing to apply — sentinel written to ${PATCH}"
-                exit 0
-              fi
-
-              echo "::error::Previous patch did not apply cleanly to ${KSU_TAG}."
-              echo "Reject hunks:"
-              echo "${PATCH_OUT}"
+            if [ "${STATUS}" -eq 2 ]; then
+              # Hard error: failed hunks — do not silently skip.
               exit 1
             fi
 
-            # Capture the applied result as the new versioned patch file
+            if [ "${STATUS}" -eq 0 ]; then
+              # All changes already upstream — write empty sentinel, nothing to apply.
+              echo "Samsung KDP/RKP/DEFEX fully merged in ${KSU_TAG} — creating empty sentinel patch."
+              touch "${PATCH}"
+              cd "${WS}"
+              echo "Sentinel written to ${PATCH}"
+              exit 0
+            fi
+
+            # STATUS == 1: patch applies cleanly — apply it and capture as the new versioned patch.
+            echo "Rebasing ${PREV_TAG} Samsung patch onto ${KSU_TAG}."
+            if patch -p1 --forward --reject-file=- < "${PREV_PATCH}"; then
+              echo "Patch applied cleanly to ${KSU_TAG}."
+            else
+              echo "::error::Patch failed to apply to ${KSU_TAG} (unexpected after clean dry-run)."
+              exit 1
+            fi
+
             git diff HEAD > "${PATCH}"
             git checkout -- .
             cd "${WS}"
-
             echo "Generated patch saved to ${PATCH}"
           fi
 
@@ -356,6 +371,20 @@ jobs:
 
           echo "Applying ${PATCH} to KernelSU ${KSU_TAG}"
           cd "${WS}/KernelSU"
+
+          # Final safety dry-run before real apply: catch any partial-upstream
+          # situation that slipped through (e.g. mid-cycle partial merge).
+          samsung_upstream_status "${PATCH}"
+          APPLY_STATUS=$?
+          if [ "${APPLY_STATUS}" -eq 2 ]; then
+            echo "::error::Versioned patch has failed hunks against ${KSU_TAG} — manual intervention required."
+            exit 1
+          fi
+          if [ "${APPLY_STATUS}" -eq 0 ]; then
+            echo "Versioned patch already fully applied in ${KSU_TAG} — skipping apply step."
+            exit 0
+          fi
+
           if patch -p1 --forward --reject-file=- < "${PATCH}"; then
             echo "Patch applied successfully."
           else
