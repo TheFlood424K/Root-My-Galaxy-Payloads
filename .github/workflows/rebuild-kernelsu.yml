@@ -284,6 +284,9 @@ jobs:
           #   0  → all hunks are already applied (upstream merged)
           #   1  → patch applies cleanly (needs to be applied)
           #   2  → one or more hunks FAILED (stale/broken patch)
+          #
+          # IMPORTANT: all call sites must use `samsung_upstream_status ... || true`
+          # so that set -e does not kill the script when the function returns 2.
           samsung_upstream_status() {
             local prev_patch="$1"
             local dry_out
@@ -318,7 +321,7 @@ jobs:
           USE_PREV=false
           if [ -f "${PATCH}" ] && [ -s "${PATCH}" ]; then
             cd "${WS}/KernelSU"
-            samsung_upstream_status "${PATCH}"
+            samsung_upstream_status "${PATCH}" || true   # || true: let set -e see $?, not abort on return 2
             VERSIONED_STATUS=$?
             cd "${WS}"
 
@@ -350,7 +353,7 @@ jobs:
             echo "Checking previous patch (${PREV_TAG}) against ${KSU_TAG}: ${PREV_PATCH}"
 
             cd "${WS}/KernelSU"
-            samsung_upstream_status "${PREV_PATCH}"
+            samsung_upstream_status "${PREV_PATCH}" || true   # || true: guard against set -e on return 2
             STATUS=$?
 
             if [ "${STATUS}" -eq 2 ]; then
@@ -391,7 +394,7 @@ jobs:
           cd "${WS}/KernelSU"
 
           # Final safety dry-run before real apply.
-          samsung_upstream_status "${PATCH}"
+          samsung_upstream_status "${PATCH}" || true   # || true: guard against set -e on return 2
           APPLY_STATUS=$?
           if [ "${APPLY_STATUS}" -eq 2 ]; then
             echo "::error::Versioned patch still has failed hunks after rebase attempt — manual intervention required."
