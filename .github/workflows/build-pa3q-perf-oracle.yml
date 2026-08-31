@@ -84,8 +84,7 @@ jobs:
           if [ ! -f "${NDK_BIN}/ld.lld" ]; then
             if [ -f "${NDK_BIN}/lld" ]; then
               ln -sf "${NDK_BIN}/lld" "${NDK_BIN}/ld.lld"
-              echo "Symlink: ld.lld -> lld"
-            else
+              else
               echo "::error::No lld found in NDK bin"
               exit 1
             fi
@@ -167,7 +166,7 @@ jobs:
             echo "Artifact already up to date — nothing to commit."
           else
             git commit -m "artifact: add pa3q-S938NKSUACZF1-perf perf_phys oracle build (closes #6)"
-            git push
+            git push origin HEAD:main
           fi
 
       - name: Upload artifact (workflow run archive)
