@@ -383,7 +383,7 @@ index 00000000..b882f099
 +#endif
 +}
 diff --git a/kernel/core/init.c b/kernel/core/init.c
-index e9cd1023..modified 100644
+index e9cd1023a0b4e75105efa8cd6957eb80bc70c3dc..e9cd1023a0b4e75105efa8cd6957eb80bc70c3dc 100644
 --- a/kernel/core/init.c
 +++ b/kernel/core/init.c
 @@ -8,6 +8,7 @@
@@ -566,7 +566,7 @@ index 26ca600d..537f9d32 100644
  
  #include <linux/version.h>
 diff --git a/userspace/ksud/src/late_load.rs b/userspace/ksud/src/late_load.rs
-index 8e6f0fe6..modified 100644
+index 8e6f0fe6a308514446c043f10da2247ce86aecdb..8e6f0fe6a308514446c043f10da2247ce86aecdb 100644
 --- a/userspace/ksud/src/late_load.rs
 +++ b/userspace/ksud/src/late_load.rs
 @@ -1,5 +1,6 @@
