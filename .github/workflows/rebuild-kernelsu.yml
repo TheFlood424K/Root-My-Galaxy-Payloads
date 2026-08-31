@@ -267,48 +267,39 @@ jobs:
             PREV_TAG=$(basename "${PREV_PATCH}" | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+')
             echo "Rebasing from ${PREV_TAG} patch: ${PREV_PATCH}"
 
-            # Strip `index <old>..<new>` lines so git apply uses pure context
-            # matching rather than trying to locate blob SHAs from the old tag
-            # in the new tag's object store (which would fail with no rejects).
-            STRIPPED_PATCH="${WS}/prev-patch-stripped.patch"
-            grep -v '^index ' "${PREV_PATCH}" > "${STRIPPED_PATCH}"
-
-            # Checkout the previous tag into a sibling directory and verify
-            # the stripped patch still applies to it cleanly.
-            git -C "${WS}/KernelSU" worktree add "${WS}/KernelSU-prev" "${PREV_TAG}" 2>/dev/null \
-              || git clone --depth=1 --branch "${PREV_TAG}" \
-                   https://github.com/tiann/KernelSU.git "${WS}/KernelSU-prev"
-
-            git -C "${WS}/KernelSU-prev" submodule update --init --recursive 2>/dev/null || true
-            git -C "${WS}/KernelSU-prev" apply "${STRIPPED_PATCH}" || {
-              echo "::error::Previous patch does not apply to ${PREV_TAG} even after stripping index lines — manual intervention needed."
+            # Use `patch -p1` instead of `git apply` so blob-SHA `index` lines
+            # are ignored entirely. git apply uses those SHAs as a 3-way merge
+            # base; when they don't exist in the new tag's object store it fails
+            # silently (no .rej files). `patch -p1` always does context-only
+            # matching and handles new-file creation via --- /dev/null headers.
+            cd "${WS}/KernelSU"
+            if patch -p1 --forward --reject-file=- < "${PREV_PATCH}"; then
+              echo "Patch applied cleanly to ${KSU_TAG}."
+            else
+              echo "::error::Previous patch did not apply cleanly to ${KSU_TAG}."
+              echo "Reject hunks:"
+              patch -p1 --forward --dry-run < "${PREV_PATCH}" 2>&1 || true
               exit 1
-            }
+            fi
 
-            # Apply the stripped patch onto the new tag with 3-way merge,
-            # then capture the result as the new versioned patch.
-            git -C "${WS}/KernelSU" apply --3way "${STRIPPED_PATCH}" 2>/dev/null || {
-              echo "::error::Previous patch did not apply cleanly to ${KSU_TAG} even with --3way."
-              echo "Reject files:"
-              find "${WS}/KernelSU" -name '*.rej' | head -20
-              cat $(find "${WS}/KernelSU" -name '*.rej' | head -5) 2>/dev/null || true
-              exit 1
-            }
-            git -C "${WS}/KernelSU" diff HEAD > "${PATCH}"
-            git -C "${WS}/KernelSU" checkout -- .
+            # Capture the applied result as the new versioned patch file
+            git diff HEAD > "${PATCH}"
+            git checkout -- .
+            cd "${WS}"
 
             echo "Generated patch saved to ${PATCH}"
           fi
 
-          echo "Applying ${PATCH}"
-          # Strip index lines here too so the final apply is also context-only
-          APPLY_PATCH="${WS}/apply-patch-stripped.patch"
-          grep -v '^index ' "${PATCH}" > "${APPLY_PATCH}"
-          git -C "${WS}/KernelSU" apply --check "${APPLY_PATCH}" || {
+          echo "Applying ${PATCH} to KernelSU ${KSU_TAG}"
+          cd "${WS}/KernelSU"
+          if patch -p1 --forward --reject-file=- < "${PATCH}"; then
+            echo "Patch applied successfully."
+          else
             echo "::error::Patch does not apply cleanly to ${KSU_TAG}."
+            echo "Failed hunks (dry-run):"
+            patch -p1 --forward --dry-run < "${PATCH}" 2>&1 || true
             exit 1
-          }
-          git -C "${WS}/KernelSU" apply "${APPLY_PATCH}"
+          fi
 
       - name: Build .ko inside DDK container
         env:
