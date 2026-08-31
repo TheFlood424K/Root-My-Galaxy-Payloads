@@ -270,7 +270,7 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: Apply Samsung patch (auto-generate if missing)
+      - name: Apply Samsung patch (auto-generate if missing or stale)
         env:
           KSU_TAG: ${{ needs.gate.outputs.ksu_tag }}
         run: |
@@ -278,35 +278,32 @@ jobs:
           WS="${GITHUB_WORKSPACE}"
           PATCH="${WS}/kernelsu/patches/KernelSU-${KSU_TAG}-samsung-kdp-rkp-defex.patch"
 
-          # ── Helper: use patch --dry-run to determine whether the previous
-          # patch is already fully applied in the new KernelSU tree.
+          # ── Helper: use patch --dry-run to determine patch applicability.
           #
           # Returns:
           #   0  → all hunks are already applied (upstream merged)
           #   1  → patch applies cleanly (needs to be applied)
-          #   2  → one or more hunks FAILED (hard error, do not skip)
+          #   2  → one or more hunks FAILED (stale/broken patch)
           samsung_upstream_status() {
             local prev_patch="$1"
             local dry_out
             dry_out=$(patch -p1 --forward --dry-run < "${prev_patch}" 2>&1 || true)
 
-            local failed reversed
-            failed=$(echo "${dry_out}"  | grep -c "FAILED" || true)
-            reversed=$(echo "${dry_out}" | grep -c "Reversed\|already exists\|previously applied" || true)
-            local total_hunks
-            total_hunks=$(echo "${dry_out}" | grep -c "^Hunk\|^patching file" || true)
+            local failed reversed total_hunks
+            failed=$(echo "${dry_out}"    | grep -c "FAILED"                              || true)
+            reversed=$(echo "${dry_out}"  | grep -c "Reversed\|already exists\|previously applied" || true)
+            total_hunks=$(echo "${dry_out}" | grep -c "^Hunk\|^patching file"             || true)
 
             echo "::debug::samsung_upstream_status failed=${failed} reversed=${reversed} total=${total_hunks}"
 
             if [ "${failed}" -gt 0 ]; then
-              echo "::error::Samsung patch has ${failed} FAILED hunk(s) against ${KSU_TAG} — cannot auto-skip."
+              echo "::warning::Patch $(basename ${prev_patch}) has ${failed} FAILED hunk(s) against ${KSU_TAG}."
               echo "Dry-run output:"
               echo "${dry_out}"
               return 2
             fi
 
             if [ "${reversed}" -gt 0 ] && [ "${failed}" -eq 0 ]; then
-              # All hunks were either already applied or reversed — upstream merged.
               echo "All ${total_hunks} hunk(s) already present in ${KSU_TAG} (upstream merge confirmed)."
               return 0
             fi
@@ -315,12 +312,34 @@ jobs:
             return 1
           }
 
-          if [ ! -f "${PATCH}" ] || [ ! -s "${PATCH}" ]; then
+          # ── Resolve the patch to use: prefer versioned, fall back to prev ──
+          # If the versioned patch exists but has failed hunks, treat it as
+          # missing and fall through to the auto-generation path below.
+          USE_PREV=false
+          if [ -f "${PATCH}" ] && [ -s "${PATCH}" ]; then
+            cd "${WS}/KernelSU"
+            samsung_upstream_status "${PATCH}"
+            VERSIONED_STATUS=$?
+            cd "${WS}"
+
+            if [ "${VERSIONED_STATUS}" -eq 2 ]; then
+              echo "Versioned patch for ${KSU_TAG} has failed hunks — falling back to previous-patch rebase."
+              USE_PREV=true
+            fi
+            # VERSIONED_STATUS 0 or 1 are handled further down as normal.
+          fi
+
+          if [ ! -f "${PATCH}" ] || [ ! -s "${PATCH}" ] || [ "${USE_PREV}" = "true" ]; then
             echo "No valid patch for ${KSU_TAG} — attempting auto-generation from previous version."
 
-            # Find the most recent existing non-empty patch (by version sort)
+            # Find the most recent existing non-empty patch (by version sort),
+            # excluding the current target patch if it exists but is stale.
             PREV_PATCH=$(ls -1 "${WS}/kernelsu/patches/KernelSU-v"*"-samsung-kdp-rkp-defex.patch" \
-              2>/dev/null | xargs -r grep -l . | sort -V | tail -1)
+              2>/dev/null \
+              | grep -v "KernelSU-${KSU_TAG}-" \
+              | xargs -r grep -l . \
+              | sort -V \
+              | tail -1)
 
             if [ -z "${PREV_PATCH}" ]; then
               echo "::error::No previous Samsung patch found to rebase from."
@@ -335,12 +354,11 @@ jobs:
             STATUS=$?
 
             if [ "${STATUS}" -eq 2 ]; then
-              # Hard error: failed hunks — do not silently skip.
+              echo "::error::Previous patch (${PREV_TAG}) also has failed hunks against ${KSU_TAG} — manual intervention required."
               exit 1
             fi
 
             if [ "${STATUS}" -eq 0 ]; then
-              # All changes already upstream — write empty sentinel, nothing to apply.
               echo "Samsung KDP/RKP/DEFEX fully merged in ${KSU_TAG} — creating empty sentinel patch."
               touch "${PATCH}"
               cd "${WS}"
@@ -348,7 +366,7 @@ jobs:
               exit 0
             fi
 
-            # STATUS == 1: patch applies cleanly — apply it and capture as the new versioned patch.
+            # STATUS == 1: patch applies cleanly — apply and capture as new versioned patch.
             echo "Rebasing ${PREV_TAG} Samsung patch onto ${KSU_TAG}."
             if patch -p1 --forward --reject-file=- < "${PREV_PATCH}"; then
               echo "Patch applied cleanly to ${KSU_TAG}."
@@ -372,12 +390,11 @@ jobs:
           echo "Applying ${PATCH} to KernelSU ${KSU_TAG}"
           cd "${WS}/KernelSU"
 
-          # Final safety dry-run before real apply: catch any partial-upstream
-          # situation that slipped through (e.g. mid-cycle partial merge).
+          # Final safety dry-run before real apply.
           samsung_upstream_status "${PATCH}"
           APPLY_STATUS=$?
           if [ "${APPLY_STATUS}" -eq 2 ]; then
-            echo "::error::Versioned patch has failed hunks against ${KSU_TAG} — manual intervention required."
+            echo "::error::Versioned patch still has failed hunks after rebase attempt — manual intervention required."
             exit 1
           fi
           if [ "${APPLY_STATUS}" -eq 0 ]; then
