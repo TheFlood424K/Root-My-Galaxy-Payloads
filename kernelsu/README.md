@@ -1,7 +1,7 @@
 # Samsung KernelSU late-load builds
 
-The files in this directory are built from KernelSU `v3.2.5`, commit
-`b0bc817b4e966aa6aa830834eaf6ef765d821d40`. They are not interchangeable
+The files in this directory are built from KernelSU `v3.3.0`, commit
+`932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e`. They are not interchangeable
 between KMIs.
 
 ## Versioned artifacts
@@ -267,7 +267,7 @@ cargo build --release --target aarch64-linux-android -p ksud
 ## Rebuild the A155N 5.10 artifact
 
 Use the exact `A155NKSS6BYH1` IKCONFIG and Samsung source commit
-`5074ff414f1b835fba113b71175d4f217b1cdc39`. Prepare the target tree with the
+`932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e`. Prepare the target tree with the
 same compiler target from the first configuration step:
 
 ```sh
