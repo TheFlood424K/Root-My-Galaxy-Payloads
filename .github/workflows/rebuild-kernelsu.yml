@@ -201,12 +201,46 @@ jobs:
           # it is used below as the linker binary name, not as a Rust target triple.
           targets: aarch64-linux-android
 
+      # Cache the NDK installation by version so it is only downloaded once
+      # across all matrix jobs and subsequent runs.
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/ndk/r29
+          key: ndk-r29
+
       - name: Install Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
           ndk-version: r29
           add-to-path: true
+          # Let setup-ndk skip the download when the cache already populated the path
+          local-cache: true
+
+      # Cache Cargo registry index + downloaded crate sources.
+      # Keyed on Cargo.lock so a dependency bump automatically busts this cache.
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ hashFiles('KernelSU/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      # Cache compiled Cargo artifacts per API-level target triple.
+      # Each of android31 / android33 / android35 gets its own shard so
+      # sharing a warm cache between builds that share the same triple
+      # (e.g. the four android14-6.1 targets all use android35) is free.
+      - name: Cache Cargo build artifacts
+        uses: actions/cache@v4
+        with:
+          path: KernelSU/target
+          key: cargo-build-${{ matrix.cargo_target }}-${{ hashFiles('KernelSU/Cargo.lock') }}
+          restore-keys: cargo-build-${{ matrix.cargo_target }}-
 
       - name: Checkout latest KernelSU at target tag
         uses: actions/checkout@v4
@@ -253,10 +287,6 @@ jobs:
             }
             cd ..
 
-            # Diff the patched prev tree against the clean new tree to get a migration diff,
-            # then apply that migration diff on top of a fresh new-tag checkout to produce
-            # the combined patch we actually want.
-            #
             # Strategy: apply prev patch to new tag (with --3way for resilience), then
             # git diff the result against the clean new tag to emit the final patch.
             cd KernelSU
@@ -324,15 +354,11 @@ jobs:
           NDK_BIN="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export PATH="${NDK_BIN}:${PATH}"
           export LIBCLANG_PATH="$(llvm-config --libdir)"
-          # CARGO_TARGET (e.g. aarch64-linux-android35) selects the versioned NDK clang linker.
-          # The Rust --target is always the unversioned aarch64-linux-android triple.
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK_BIN}/${CARGO_TARGET}-clang"
           export CC_aarch64_linux_android="${NDK_BIN}/${CARGO_TARGET}-clang"
           export AR_aarch64_linux_android="${NDK_BIN}/llvm-ar"
           cp "out/${KMI}_kernelsu-${{ matrix.target }}.ko" \
              "KernelSU/userspace/ksud/bin/aarch64/${KMI}_kernelsu.ko"
-          # Cargo workspace root is KernelSU/ (it has the top-level Cargo.toml).
-          # target/ therefore lands at KernelSU/target/, not KernelSU/userspace/target/.
           cd KernelSU
           cargo build --release --target aarch64-linux-android -p ksud
           cp "${GITHUB_WORKSPACE}/KernelSU/target/aarch64-linux-android/release/ksud" \
