@@ -218,14 +218,27 @@ jobs:
       - name: Fix NDK clang symlink (r27+)
         run: |
           NDK_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          
+          # Fix bare clang → versioned clang-XX
           VERSIONED=$(ls "${NDK_BIN}/clang-"[0-9]* 2>/dev/null | head -1)
           if [ -n "${VERSIONED}" ]; then
             ln -sf "${VERSIONED}" "${NDK_BIN}/clang"
             echo "Symlink: clang -> $(basename ${VERSIONED})"
           else
             echo "::error::No versioned clang found in NDK bin"
-            ls "${NDK_BIN}/clang"* || true
             exit 1
+          fi
+          
+          # Fix ld.lld → lld (NDK r27+ ships lld, not ld.lld)
+          if [ ! -f "${NDK_BIN}/ld.lld" ]; then
+            if [ -f "${NDK_BIN}/lld" ]; then
+              ln -sf "${NDK_BIN}/lld" "${NDK_BIN}/ld.lld"
+              echo "Symlink: ld.lld -> lld"
+            else
+              echo "::error::No lld found in NDK bin"
+              ls "${NDK_BIN}/ld"* || true
+              exit 1
+            fi
           fi
 
       # Cache Cargo registry index + downloaded crate sources.
