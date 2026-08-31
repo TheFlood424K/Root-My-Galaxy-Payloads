@@ -207,6 +207,7 @@ index 00000000..b882f099
 +typedef unsigned int (*kdp_usecount_dec_and_test_t)(struct cred *cred);
 +#endif
 +#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
++#include <linux/ucount.h>
 +typedef long (*inc_rlimit_ucounts_t)(struct ucounts *ucounts, enum rlimit_type type, long value);
 +typedef bool (*dec_rlimit_ucounts_t)(struct ucounts *ucounts, enum rlimit_type type, long value);
 +#endif
@@ -1024,107 +1025,4 @@ index 518ef414..13bfa134 100644
  
  void __init ksu_app_profile_init(void)
 diff --git a/userspace/ksud/src/late_load.rs b/userspace/ksud/src/late_load.rs
-index 8e6f0fe6..19f37340 100644
---- a/userspace/ksud/src/late_load.rs
-+++ b/userspace/ksud/src/late_load.rs
-@@ -1,7 +1,6 @@
- use anyhow::{Context, Result};
- use log::{info, warn};
- use rustix::cstr;
--use std::process::Command;
- 
- use crate::module::{handle_updated_modules, prune_modules};
- use crate::{assets, defs, init_event, metamodule, restorecon, utils};
-@@ -35,11 +34,14 @@ fn dump_process_info(label: &str) {
-     );
- }
- 
--pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Result<()> {
--    utils::daemonize(false)?;
-+pub fn run(_package_name: &String, kmi: Option<String>, allow_shell: bool) -> Result<()> {
-     info!("late-load command triggered!");
-     dump_process_info("late-load start");
- 
-+    // Copy the daemon before loading the module changes this process's
-+    // security context. The remaining install steps require KernelSU policy.
-+    utils::stage_daemon_from("/data/local/tmp/.ksud-stage").context("Failed to stage ksud")?;
-+
-     // 1. Check if KernelSU is already loaded
-     if ksuinit::has_kernelsu() {
-         info!("KernelSU already loaded, skip loading ko");
-@@ -129,18 +131,5 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
-     // 13. Execute boot-completed stage scripts (non-blocking)
-     init_event::run_stage("boot-completed", false);
- 
--    // 14. Restart Manager so it gets a fresh ksu fd from the newly loaded kernel module
--    info!("Restarting KernelSU Manager {package_name}...");
--    let _ = Command::new("am")
--        .args(["force-stop", package_name])
--        .status();
--    let _ = Command::new("am")
--        .args([
--            "start",
--            "-n",
--            &format!("{package_name}/me.weishu.kernelsu.ui.MainActivity"),
--        ])
--        .status();
--
-     Ok(())
- }
-diff --git a/userspace/ksud/src/utils.rs b/userspace/ksud/src/utils.rs
-index 0e9ba510..bed3e3e7 100644
---- a/userspace/ksud/src/utils.rs
-+++ b/userspace/ksud/src/utils.rs
-@@ -1,7 +1,8 @@
- use anyhow::{Context, Error, Ok, Result, bail};
--use rustix::fs::{Mode, OFlags, open};
-+use rustix::fs::{Mode, OFlags, chown, open};
- use rustix::process::setpgid;
- use rustix::stdio::{dup2_stderr, dup2_stdin, dup2_stdout};
-+use rustix::thread::{Gid, Uid};
- use std::{
-     ffi::{CStr, CString, c_char, c_void},
-     fs::{File, OpenOptions, create_dir_all, remove_file, write},
-@@ -230,6 +231,31 @@ fn link_ksud_to_bin() -> Result<()> {
-     }
-     Ok(())
- }
-+pub fn stage_daemon_from(staged_exe: impl AsRef<std::path::Path>) -> Result<()> {
-+    ensure_dir_exists(defs::ADB_DIR)?;
-+    std::fs::rename(staged_exe.as_ref(), defs::DAEMON_PATH).with_context(|| {
-+        format!(
-+            "Failed to rename {} to {}",
-+            staged_exe.as_ref().display(),
-+            defs::DAEMON_PATH
-+        )
-+    })?;
-+    #[cfg(unix)]
-+    set_permissions(defs::DAEMON_PATH, Permissions::from_mode(0o755))?;
-+    Ok(())
-+}
-+
-+pub fn finish_install(libadbroot: Option<PathBuf>) -> Result<()> {
-+    restorecon::lsetfilecon(defs::DAEMON_PATH, restorecon::KSU_CON)?;
-+    assets::ensure_binaries(false).with_context(|| "Failed to extract assets")?;
-+    link_ksud_to_bin()?;
-+    if let Some(libadbroot) = libadbroot {
-+        ensure_dir_exists(defs::LIBRARY_DIR)?;
-+        let _ = std::fs::remove_file(defs::LIBADBROOT_PATH);
-+        let _ = std::fs::copy(libadbroot, defs::LIBADBROOT_PATH);
-+    }
-+    Ok(())
-+}
- 
- pub fn install(libadbroot: Option<PathBuf>, data_path: Option<PathBuf>) -> Result<()> {
-     ensure_dir_exists(defs::ADB_DIR)?;
-@@ -321,10 +347,6 @@ pub fn daemonize_with<F: FnOnce() -> Result<()>>(use_init_pgrp: bool, configure:
-     Ok(())
- }
- 
--pub fn daemonize(use_init_pgrp: bool) -> Result<()> {
--    daemonize_with(use_init_pgrp, || Ok(()))
--}
--
- pub fn create_daemon(use_init_pgrp: bool) -> Result<bool> {
-     create_daemon_with(use_init_pgrp, || Ok(()))
- }
+index 8e6f0fe6..
