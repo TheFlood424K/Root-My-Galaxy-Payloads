@@ -56,12 +56,6 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Cache Android NDK
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.tool_cache }}/ndk/r29
-          key: ndk-r29
-
       - name: Install Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -69,6 +63,12 @@ jobs:
           ndk-version: r29
           add-to-path: true
           local-cache: true
+
+      - name: Cache Android NDK
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup-ndk.outputs.ndk-path }}
+          key: ndk-r29
 
       - name: Fix NDK clang symlink (r27+)
         run: |
@@ -115,7 +115,7 @@ jobs:
       - name: Verify artifact size
         run: |
           EXPECTED=133344
-          ACTUAL=$(stat -c %s build/pa3q/cve-2026-43499)
+          ACTUAL=$(stat -c %s build/pa3q/cve-2026-43499-app.so)
           echo "Expected: ${EXPECTED} bytes"
           echo "Actual:   ${ACTUAL} bytes"
           if [ "$ACTUAL" != "$EXPECTED" ]; then
@@ -127,7 +127,7 @@ jobs:
       - name: Stage artifact
         run: |
           mkdir -p artifacts/pa3q-S938NKSUACZF1-perf
-          cp build/pa3q/cve-2026-43499 \
+          cp build/pa3q/cve-2026-43499-app.so \
              artifacts/pa3q-S938NKSUACZF1-perf/cve-2026-43499-app.so
           echo "Staged to artifacts/pa3q-S938NKSUACZF1-perf/cve-2026-43499-app.so"
 
