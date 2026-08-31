@@ -278,7 +278,112 @@ jobs:
           WS="${GITHUB_WORKSPACE}"
           PATCH="${WS}/kernelsu/patches/KernelSU-${KSU_TAG}-samsung-kdp-rkp-defex.patch"
 
-          # ── Helper: use patch --dry-run to determine patch applicability.
+          # ── Helper: emit a full manual-rebase guide and fail the step. ─────
+          # Called whenever a patch cannot apply cleanly.
+          #
+          # Args:
+          #   $1  patch file that failed
+          #   $2  dry-run output (already captured)
+          fail_with_rebase_instructions() {
+            local failed_patch="$1"
+            local dry_out="$2"
+            local patch_basename
+            patch_basename=$(basename "${failed_patch}")
+
+            # ── Print the raw failed-hunk details ───────────────────────────
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  MANUAL REBASE REQUIRED — patch cannot apply to ${KSU_TAG}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            echo "▶ Patch:  ${patch_basename}"
+            echo "▶ Target: tiann/KernelSU @ ${KSU_TAG}"
+            echo ""
+            echo "── Failed hunks (dry-run output) ───────────────────────────"
+            echo "${dry_out}" | grep -E "FAILED|patching file|Hunk" || echo "(no hunk lines captured)"
+            echo ""
+            echo "── Full dry-run output ─────────────────────────────────────"
+            echo "${dry_out}"
+            echo ""
+
+            # ── Option A: PowerShell (Windows) ──────────────────────────────
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  HOW TO FIX — Option A: PowerShell (Windows)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            cat <<'PWSH'
+
+          Prerequisites: Git for Windows (includes patch.exe), and either WSL or
+          Git Bash for the patch command. Run the block below in Git Bash or WSL.
+
+          # 1. Clone both repos side-by-side
+          git clone https://github.com/tiann/KernelSU.git --branch ${KSU_TAG} --depth 1
+          git clone https://github.com/TheFlood424K/Root-My-Galaxy-Payloads.git
+
+          # 2. Copy the failing patch into the KernelSU tree
+          Copy-Item "Root-My-Galaxy-Payloads\kernelsu\patches\${patch_basename}" `
+                    "KernelSU\${patch_basename}"
+
+          # 3. In Git Bash / WSL, attempt the dry-run to see every failed hunk
+          cd KernelSU
+          patch -p1 --dry-run < "${patch_basename}"
+
+          # 4. Apply with rejection files so you can see exactly what failed
+          patch -p1 --reject-file=samsung.rej < "${patch_basename}"
+          # Open each *.rej file — it shows the context lines that no longer match.
+          # Edit the corresponding source file to manually apply each hunk.
+
+          # 5. Once all hunks are resolved, capture the new patch
+          git diff HEAD > "../Root-My-Galaxy-Payloads/kernelsu/patches/KernelSU-${KSU_TAG}-samsung-kdp-rkp-defex.patch"
+
+          # 6. Commit and push from PowerShell
+          cd ..\Root-My-Galaxy-Payloads
+          git add kernelsu\patches\KernelSU-${KSU_TAG}-samsung-kdp-rkp-defex.patch
+          git commit -m "fix: rebase Samsung KDP/RKP/DEFEX patch onto ${KSU_TAG}"
+          git push
+
+          PWSH
+
+            # ── Option B: GitHub web UI ─────────────────────────────────────
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  HOW TO FIX — Option B: GitHub web UI (no local tools)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            cat <<WEBUI
+
+          This option lets you edit the patch file directly in the browser.
+          It works when only a small number of context lines changed (e.g. a
+          function was moved a few lines up/down).
+
+          1. Open the failing patch in the GitHub editor:
+             https://github.com/TheFlood424K/Root-My-Galaxy-Payloads/edit/main/kernelsu/patches/${patch_basename}
+
+          2. Open the changed KernelSU source file(s) listed in the dry-run
+             output above in a second tab:
+             https://github.com/tiann/KernelSU/tree/${KSU_TAG}
+
+          3. For each FAILED hunk in the patch:
+             a. Find the @@ -LINE,COUNT +LINE,COUNT @@ header.
+             b. Navigate to that file and line number in the KernelSU source.
+             c. Update the context lines (lines starting with a space) in the
+                patch to match what is actually in ${KSU_TAG}.
+             d. Update the @@ line numbers if lines shifted.
+
+          4. Commit directly to main with message:
+             fix: rebase Samsung KDP/RKP/DEFEX patch onto ${KSU_TAG}
+
+          5. Re-run this workflow from:
+             https://github.com/TheFlood424K/Root-My-Galaxy-Payloads/actions/workflows/rebuild-kernelsu.yml
+
+          Note: if more than 2-3 hunks failed, use Option A instead — the web
+          editor becomes error-prone for large patch edits.
+
+          WEBUI
+
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "::error::Manual rebase required for ${patch_basename} against ${KSU_TAG}. See instructions above."
+            exit 1
+          }
+
+          # ── Helper: use patch --dry-run to determine patch applicability. ──
           #
           # Returns:
           #   0  → all hunks are already applied (upstream merged)
@@ -301,10 +406,13 @@ jobs:
 
             if [ "${failed}" -gt 0 ]; then
               echo "::warning::Patch $(basename ${prev_patch}) has ${failed} FAILED hunk(s) against ${KSU_TAG}."
-              echo "Dry-run output:"
-              echo "${dry_out}"
+              # Store dry_out in a temp file so the caller can retrieve it for fail_with_rebase_instructions
+              echo "${dry_out}" > /tmp/samsung_dry_out_last
               return 2
             fi
+
+            # Clear the temp file on non-failure paths
+            echo "" > /tmp/samsung_dry_out_last
 
             if [ "${reversed}" -gt 0 ] && [ "${failed}" -eq 0 ]; then
               echo "All ${total_hunks} hunk(s) already present in ${KSU_TAG} (upstream merge confirmed)."
@@ -357,8 +465,8 @@ jobs:
             STATUS=$?
 
             if [ "${STATUS}" -eq 2 ]; then
-              echo "::error::Previous patch (${PREV_TAG}) also has failed hunks against ${KSU_TAG} — manual intervention required."
-              exit 1
+              SAVED_DRY_OUT=$(cat /tmp/samsung_dry_out_last)
+              fail_with_rebase_instructions "${PREV_PATCH}" "${SAVED_DRY_OUT}"
             fi
 
             if [ "${STATUS}" -eq 0 ]; then
@@ -397,8 +505,8 @@ jobs:
           samsung_upstream_status "${PATCH}" || true   # || true: guard against set -e on return 2
           APPLY_STATUS=$?
           if [ "${APPLY_STATUS}" -eq 2 ]; then
-            echo "::error::Versioned patch still has failed hunks after rebase attempt — manual intervention required."
-            exit 1
+            SAVED_DRY_OUT=$(cat /tmp/samsung_dry_out_last)
+            fail_with_rebase_instructions "${PATCH}" "${SAVED_DRY_OUT}"
           fi
           if [ "${APPLY_STATUS}" -eq 0 ]; then
             echo "Versioned patch already fully applied in ${KSU_TAG} — skipping apply step."
@@ -408,10 +516,8 @@ jobs:
           if patch -p1 --forward --reject-file=- < "${PATCH}"; then
             echo "Patch applied successfully."
           else
-            echo "::error::Patch does not apply cleanly to ${KSU_TAG}."
-            echo "Failed hunks (dry-run):"
-            patch -p1 --forward --dry-run < "${PATCH}" 2>&1 || true
-            exit 1
+            DRY_OUT=$(patch -p1 --forward --dry-run < "${PATCH}" 2>&1 || true)
+            fail_with_rebase_instructions "${PATCH}" "${DRY_OUT}"
           fi
 
       - name: Build .ko inside DDK container
