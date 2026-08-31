@@ -215,6 +215,20 @@ jobs:
           add-to-path: true
           local-cache: true
 
+      - name: Fix NDK clang symlink (r27+)
+        run: |
+          NDK_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          if [ ! -f "${NDK_BIN}/clang" ]; then
+            VERSIONED=$(ls "${NDK_BIN}/clang-"* 2>/dev/null | head -1)
+            if [ -n "${VERSIONED}" ]; then
+              ln -s "${VERSIONED}" "${NDK_BIN}/clang"
+              echo "Created symlink: clang -> $(basename ${VERSIONED})"
+            else
+              echo "::error::No versioned clang found in NDK bin"
+              exit 1
+            fi
+          fi
+
       # Cache Cargo registry index + downloaded crate sources.
       - name: Cache Cargo registry
         uses: actions/cache@v4
