@@ -196,9 +196,6 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          # aarch64-linux-android is the only rustup-distributed std target for Android.
-          # The versioned API-level suffix (android31/33/35) is an NDK clang concept only;
-          # it is used below as the linker binary name, not as a Rust target triple.
           targets: aarch64-linux-android
 
       # Cache the NDK installation by version so it is only downloaded once
@@ -216,11 +213,9 @@ jobs:
         with:
           ndk-version: r29
           add-to-path: true
-          # Let setup-ndk skip the download when the cache already populated the path
           local-cache: true
 
       # Cache Cargo registry index + downloaded crate sources.
-      # Keyed on Cargo.lock so a dependency bump automatically busts this cache.
       - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
@@ -232,9 +227,6 @@ jobs:
           restore-keys: cargo-registry-
 
       # Cache compiled Cargo artifacts per API-level target triple.
-      # Each of android31 / android33 / android35 gets its own shard so
-      # sharing a warm cache between builds that share the same triple
-      # (e.g. the four android14-6.1 targets all use android35) is free.
       - name: Cache Cargo build artifacts
         uses: actions/cache@v4
         with:
@@ -257,59 +249,56 @@ jobs:
           KSU_TAG: ${{ needs.gate.outputs.ksu_tag }}
         run: |
           set -euo pipefail
-          PATCH="kernelsu/patches/KernelSU-${KSU_TAG}-samsung-kdp-rkp-defex.patch"
+          WS="${GITHUB_WORKSPACE}"
+          PATCH="${WS}/kernelsu/patches/KernelSU-${KSU_TAG}-samsung-kdp-rkp-defex.patch"
 
-          if [ ! -f "$PATCH" ] || [ ! -s "$PATCH" ]; then
+          if [ ! -f "${PATCH}" ] || [ ! -s "${PATCH}" ]; then
             echo "No valid patch for ${KSU_TAG} — attempting auto-generation from previous version."
 
-            # Find the most recent patch file that is older than the target tag
-            PREV_PATCH=$(ls -1 kernelsu/patches/KernelSU-v*-samsung-kdp-rkp-defex.patch 2>/dev/null \
-              | sort -V | tail -1)
+            # Find the most recent existing patch (by version sort)
+            PREV_PATCH=$(ls -1 "${WS}/kernelsu/patches/KernelSU-v"*"-samsung-kdp-rkp-defex.patch" \
+              2>/dev/null | sort -V | tail -1)
 
-            if [ -z "$PREV_PATCH" ]; then
+            if [ -z "${PREV_PATCH}" ]; then
               echo "::error::No previous Samsung patch found to rebase from."
               exit 1
             fi
 
-            PREV_TAG=$(basename "$PREV_PATCH" | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+')
+            PREV_TAG=$(basename "${PREV_PATCH}" | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+')
             echo "Rebasing from ${PREV_TAG} patch: ${PREV_PATCH}"
 
-            # Clone a second worktree at the previous tag to apply the old patch
-            git -C KernelSU worktree add ../KernelSU-prev "${PREV_TAG}" 2>/dev/null \
+            # Checkout the previous tag into a sibling directory
+            git -C "${WS}/KernelSU" worktree add "${WS}/KernelSU-prev" "${PREV_TAG}" 2>/dev/null \
               || git clone --depth=1 --branch "${PREV_TAG}" \
-                   https://github.com/tiann/KernelSU.git KernelSU-prev
+                   https://github.com/tiann/KernelSU.git "${WS}/KernelSU-prev"
 
-            cd KernelSU-prev
-            git submodules update --init --recursive 2>/dev/null || true
-            git apply "../../${PREV_PATCH}" || {
-              echo "::error::Previous patch ${PREV_PATCH} does not apply to ${PREV_TAG}."
+            # Verify the previous patch still applies cleanly to its own base tag
+            git -C "${WS}/KernelSU-prev" submodule update --init --recursive 2>/dev/null || true
+            git -C "${WS}/KernelSU-prev" apply "${PREV_PATCH}" || {
+              echo "::error::Previous patch does not apply to ${PREV_TAG} — manual intervention needed."
               exit 1
             }
-            cd ..
 
-            # Strategy: apply prev patch to new tag (with --3way for resilience), then
-            # git diff the result against the clean new tag to emit the final patch.
-            cd KernelSU
-            git apply --3way "../${PREV_PATCH}" 2>/dev/null || {
-              echo "Previous patch did not apply cleanly to ${KSU_TAG} even with --3way."
-              echo "Manual rebase required — listing rejects:"
-              find . -name '*.rej' | head -20
+            # Apply the previous patch onto the new tag with 3-way merge,
+            # then capture the result as the new versioned patch.
+            git -C "${WS}/KernelSU" apply --3way "${PREV_PATCH}" 2>/dev/null || {
+              echo "::error::Previous patch did not apply cleanly to ${KSU_TAG} even with --3way."
+              echo "Reject files:"
+              find "${WS}/KernelSU" -name '*.rej' | head -20
               exit 1
             }
-            git diff HEAD > "../${PATCH}"
-            git checkout -- .
-            cd ..
+            git -C "${WS}/KernelSU" diff HEAD > "${PATCH}"
+            git -C "${WS}/KernelSU" checkout -- .
 
             echo "Generated patch saved to ${PATCH}"
           fi
 
           echo "Applying ${PATCH}"
-          cd KernelSU
-          git apply --check "../${PATCH}" || {
+          git -C "${WS}/KernelSU" apply --check "${PATCH}" || {
             echo "::error::Patch does not apply cleanly to ${KSU_TAG}."
             exit 1
           }
-          git apply "../${PATCH}"
+          git -C "${WS}/KernelSU" apply "${PATCH}"
 
       - name: Build .ko inside DDK container
         env:
