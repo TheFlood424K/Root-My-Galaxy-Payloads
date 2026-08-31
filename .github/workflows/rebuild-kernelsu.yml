@@ -215,28 +215,71 @@ jobs:
           ref: ${{ needs.gate.outputs.ksu_tag }}
           path: KernelSU
           submodules: recursive
-          fetch-depth: 1
+          fetch-depth: 0
           lfs: true
 
-      - name: Apply Samsung patch
+      - name: Apply Samsung patch (auto-generate if missing)
+        env:
+          KSU_TAG: ${{ needs.gate.outputs.ksu_tag }}
         run: |
-          PATCH="kernelsu/patches/KernelSU-${{ needs.gate.outputs.ksu_tag }}-samsung-kdp-rkp-defex.patch"
-      
-          if [ ! -f "$PATCH" ]; then
-            echo "::error::No Samsung patch exists for KernelSU ${{ needs.gate.outputs.ksu_tag }}."
-            echo "::error::Add or rebase kernelsu/patches/KernelSU-${{ needs.gate.outputs.ksu_tag }}-samsung-kdp-rkp-defex.patch first."
-            exit 1
+          set -euo pipefail
+          PATCH="kernelsu/patches/KernelSU-${KSU_TAG}-samsung-kdp-rkp-defex.patch"
+
+          if [ ! -f "$PATCH" ] || [ ! -s "$PATCH" ]; then
+            echo "No valid patch for ${KSU_TAG} — attempting auto-generation from previous version."
+
+            # Find the most recent patch file that is older than the target tag
+            PREV_PATCH=$(ls -1 kernelsu/patches/KernelSU-v*-samsung-kdp-rkp-defex.patch 2>/dev/null \
+              | sort -V | tail -1)
+
+            if [ -z "$PREV_PATCH" ]; then
+              echo "::error::No previous Samsung patch found to rebase from."
+              exit 1
+            fi
+
+            PREV_TAG=$(basename "$PREV_PATCH" | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+')
+            echo "Rebasing from ${PREV_TAG} patch: ${PREV_PATCH}"
+
+            # Clone a second worktree at the previous tag to apply the old patch
+            git -C KernelSU worktree add ../KernelSU-prev "${PREV_TAG}" 2>/dev/null \
+              || git clone --depth=1 --branch "${PREV_TAG}" \
+                   https://github.com/tiann/KernelSU.git KernelSU-prev
+
+            cd KernelSU-prev
+            git submodules update --init --recursive 2>/dev/null || true
+            git apply "../../${PREV_PATCH}" || {
+              echo "::error::Previous patch ${PREV_PATCH} does not apply to ${PREV_TAG}."
+              exit 1
+            }
+            cd ..
+
+            # Diff the patched prev tree against the clean new tree to get a migration diff,
+            # then apply that migration diff on top of a fresh new-tag checkout to produce
+            # the combined patch we actually want.
+            #
+            # Strategy: apply prev patch to new tag (with --3way for resilience), then
+            # git diff the result against the clean new tag to emit the final patch.
+            cd KernelSU
+            git apply --3way "../${PREV_PATCH}" 2>/dev/null || {
+              echo "Previous patch did not apply cleanly to ${KSU_TAG} even with --3way."
+              echo "Manual rebase required — listing rejects:"
+              find . -name '*.rej' | head -20
+              exit 1
+            }
+            git diff HEAD > "../${PATCH}"
+            git checkout -- .
+            cd ..
+
+            echo "Generated patch saved to ${PATCH}"
           fi
-      
-          echo "Applying $PATCH"
+
+          echo "Applying ${PATCH}"
           cd KernelSU
-      
-          git apply --check "../$PATCH" || {
-            echo "::error::Patch does not apply cleanly to ${{ needs.gate.outputs.ksu_tag }}."
+          git apply --check "../${PATCH}" || {
+            echo "::error::Patch does not apply cleanly to ${KSU_TAG}."
             exit 1
           }
-      
-          git apply "../$PATCH"
+          git apply "../${PATCH}"
 
       - name: Build .ko inside DDK container
         env:
