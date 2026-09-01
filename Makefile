@@ -66,10 +66,13 @@ APP_RELEASE_OPT := -O2
 APP_RELEASE_LINK_FLAGS := -Wl,--gc-sections -Wl,--icf=all -s
 endif
 
+# -Isrc/targets allows #include P0_FINGERPRINT_HEADER (which expands to
+# "targets/<target>/p0_fingerprint.h") to resolve for any target that
+# ships a p0_fingerprint.h alongside its target.h.
 COMMON_CFLAGS := \
   -O2 -g0 -Wall -Wextra \
   -Wno-unused-parameter -Wno-sign-compare \
-  -Isrc -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
+  -Isrc -Isrc/targets -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
   $(TARGET_CFLAGS)
 
 .DEFAULT_GOAL := all
@@ -101,7 +104,7 @@ $(APP_RELEASE): $(APP_PRELOAD_SRCS) $(TARGET_HEADER) src/offset.h src/common.h s
 	  -fno-unwind-tables -fno-asynchronous-unwind-tables \
 	  -ffunction-sections -fdata-sections \
 	  -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
-	  -Isrc -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
+	  -Isrc -Isrc/targets -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
 	  $(TARGET_CFLAGS) \
 	  $(APP_PRELOAD_SRCS) -shared -pthread \
 	  $(APP_RELEASE_LINK_FLAGS) -o $@
@@ -115,7 +118,7 @@ $(APP_STABLE): $(APP_PRELOAD_SRCS) $(TARGET_HEADER) src/offset.h src/common.h sr
 	  -fno-unwind-tables -fno-asynchronous-unwind-tables \
 	  -ffunction-sections -fdata-sections \
 	  -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
-	  -Isrc -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
+	  -Isrc -Isrc/targets -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
 	  $(APP_PRELOAD_SRCS) -shared -pthread \
 	  -Wl,--gc-sections -Wl,--icf=all -s -o $@
 	@test $$(stat -c %s $@) -le $(APP_RELEASE_SIZE)
