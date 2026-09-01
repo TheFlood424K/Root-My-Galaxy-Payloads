@@ -243,6 +243,25 @@
       }
     },
     {
+      "payloadId": "e1s-S921BXXSFDZF2",
+      "displayName": "Galaxy S24 (ZF2) | Kernel 6.1.157",
+      "models": [
+        "SM-S921B"
+      ],
+      "kernelVersions": [
+        "6.1.157"
+      ],
+      "requiresFreshP0Session": true,
+      "exploit": {
+        "url": "https://raw.githubusercontent.com/TheFlood424K/Root-My-Galaxy-Payloads/main/artifacts/e1s-S921BXXSFDZF2/cve-2026-43499-app.so",
+        "size": 104128
+      },
+      "kernelsu": {
+        "url": "https://raw.githubusercontent.com/TheFlood424K/Root-My-Galaxy-Payloads/main/kernelsu/ksud-e1s-S921BXXSFDZF2-kdp",
+        "size": 4991336
+      }
+    },
+    {
       "payloadId": "essi-A566EXXSCCZG6",
       "displayName": "Galaxy A56 5G | Kernel 6.6.102",
       "models": [
