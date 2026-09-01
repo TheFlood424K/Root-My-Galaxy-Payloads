@@ -5,6 +5,12 @@
 #   - workflow_dispatch: manual run (supply ksu_tag or leave blank for latest)
 #
 # The check-ksu-release workflow is the gate; this workflow does not poll.
+#
+# Matrix targets must have a corresponding kernelsu.url entry in
+# support/targets-v3.json.  Targets removed as ambiguous (no KSU entry):
+#   dm2q-S916BXXSAFZG1  — S23+ has no kernelsu payload defined
+#   a15-A155NKSS6BYH1   — A15 has no kernelsu payload defined
+#   gts9u-X916BXXS6EZG3 — Tab S9 Ultra has no kernelsu payload defined
 
 name: Rebuild KernelSU binaries
 
@@ -128,66 +134,85 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ── Galaxy S25 series (shared ksud-s25u-kdp)
           - target: s25u-kdp
             kmi: android15-6.6
             ddk_image: ghcr.io/ylarod/ddk-min:android15-6.6-20260313
             kernel_release: 6.6.98-android15-8
             cargo_target: aarch64-linux-android35
+          # ── Galaxy S25 Ultra (SM-S938N KR)
           - target: pa3q-S938NKSUACZF1-kdp
             kmi: android15-6.6
             ddk_image: ghcr.io/ylarod/ddk-min:android15-6.6-20260313
             kernel_release: 6.6.98-android15-8
             cargo_target: aarch64-linux-android35
+          # ── Galaxy A56 5G
           - target: A566EXXSCCZG6-kdp
             kmi: android15-6.6
             ddk_image: ghcr.io/ylarod/ddk-min:android15-6.6-20260313
             kernel_release: 6.6.102-android15-8
             cargo_target: aarch64-linux-android35
+          # ── Galaxy A36 5G
           - target: A366WVLS3AYG1-kdp
             kmi: android15-6.6
             ddk_image: ghcr.io/ylarod/ddk-min:android15-6.6-20260313
             kernel_release: 6.6.46-android15-8
             cargo_target: aarch64-linux-android35
+          # ── Galaxy S24 Ultra (US)
           - target: e3q-S928USQS6DZF2-kdp
             kmi: android14-6.1
             ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
             kernel_release: 6.1.145-android14-11-33419968-abS928USQS6DZF2
             cargo_target: aarch64-linux-android35
+          # ── Galaxy S24 Ultra (International)
           - target: e3q-S928BXXS6DZF2-kdp
             kmi: android14-6.1
             ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
             kernel_release: 6.1.145-android14-11
             cargo_target: aarch64-linux-android35
+          # ── Galaxy S24+
           - target: e2s-S926BXXUEDZDR-kdp
             kmi: android14-6.1
             ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
             kernel_release: 6.1.157-android14-11
             cargo_target: aarch64-linux-android35
+          # ── Galaxy S24 (International FDZE1)
           - target: e1s-S921BXXSFDZE1-kdp
             kmi: android14-6.1
             ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
             kernel_release: 6.1.157-android14-11
             cargo_target: aarch64-linux-android35
+          # ── Galaxy S24 (International FDZF2)
+          - target: e1s-S921BXXSFDZF2-kdp
+            kmi: android14-6.1
+            ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
+            kernel_release: 6.1.157-android14-11
+            cargo_target: aarch64-linux-android35
+          # ── Galaxy S24 (KR FDZF3)
           - target: e1s-S921NKSSFDZF3-kdp
             kmi: android14-6.1
             ddk_image: ghcr.io/ylarod/ddk-min:android14-6.1-20260313
             kernel_release: 6.1.157-android14-11
             cargo_target: aarch64-linux-android35
+          # ── Galaxy S23 Ultra (ZHS/ZHN/multi-CSC FZF5)
           - target: dm3q-S9180ZHS8FZF5-kdp
             kmi: android13-5.15
             ddk_image: ghcr.io/ylarod/ddk-min:android13-5.15-20260313
             kernel_release: 5.15.189-android13-8
             cargo_target: aarch64-linux-android33
+          # ── Galaxy S23 Ultra (International FZF5)
           - target: dm3q-S918BXXSAFZF5-kdp
             kmi: android13-5.15
             ddk_image: ghcr.io/ylarod/ddk-min:android13-5.15-20260313
             kernel_release: 5.15.189-android13-8
             cargo_target: aarch64-linux-android33
+          # ── Galaxy S23 (US unlocked)
           - target: dm1q-S911U1UES6DYI3-kdp
             kmi: android13-5.15
             ddk_image: ghcr.io/ylarod/ddk-min:android13-5.15-20260313
             kernel_release: 5.15.153-android13-8
             cargo_target: aarch64-linux-android33
+          # ── Galaxy A53 5G
           - target: A536EXXSNGZG3-kdp
             kmi: android12-5.10
             ddk_image: ghcr.io/ylarod/ddk-min:android12-5.10-20260313
