@@ -69,6 +69,7 @@
  * freed slot to never be adjacent to the sk_buff reclaim window.
  *
  * If your target uses a different mm_struct size, override at build time:
+ *   -DMM_STRUCT_SZ=0x3c0   (lower-end Samsung GKI, e.g. Galaxy A15 — no full RKP padding)
  *   -DMM_STRUCT_SZ=0x500   (upstream / AOSP GKI, no Samsung RKP padding)
  *   -DMM_STRUCT_SZ=0x540   (Samsung GKI v3.3.0+, default below)
  *   -DMM_STRUCT_SZ=0x560   (some S928/Exynos variants)
@@ -77,12 +78,14 @@
 #define MM_STRUCT_SZ 0x540
 #endif
 /* Sanity checks — MM_STRUCT_SZ must be 8-byte aligned and in a
- * plausible range for any Samsung kernel we support. */
+ * plausible range for any Samsung kernel we support.
+ * Lower bound is 0x380: lower-end devices (e.g. Galaxy A15) use 0x3c0
+ * without the full RKP/KDP mm_struct extension present on flagship SoCs. */
 #if (MM_STRUCT_SZ & 7) != 0
 #error "MM_STRUCT_SZ must be a multiple of 8"
 #endif
-#if MM_STRUCT_SZ < 0x400 || MM_STRUCT_SZ > 0x800
-#error "MM_STRUCT_SZ is outside the expected Samsung kernel range (0x400-0x800)"
+#if MM_STRUCT_SZ < 0x380 || MM_STRUCT_SZ > 0x800
+#error "MM_STRUCT_SZ is outside the expected Samsung kernel range (0x380-0x800)"
 #endif
 
 #ifndef MM_ORDER
