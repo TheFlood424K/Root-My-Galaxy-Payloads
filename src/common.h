@@ -480,8 +480,17 @@ int app_trigger_fops_slide_route(void);
      APP_FOPS_DATA_ALIAS_DIAG_ONLY)
 int app_trigger_fops_oracle_slot(size_t slot);
 #endif
-#endif
-#endif
+/*
+ * scan_p0_pipe_oracle — public no-arg wrapper around the core oracle
+ * scanner, defined in pipe.c only when APP_PAYLOAD=1.
+ *
+ * slide_app.c calls this to determine the KASLR slide from the pipe slab
+ * fingerprint.  The declaration must be visible here so that clang does
+ * not reject the call as an implicit function declaration under ISO C99.
+ */
+uintptr_t scan_p0_pipe_oracle(void);
+#endif /* APP_PHYS_P0_ORACLE */
+#endif /* APP_PAYLOAD */
 
 ssize_t configfs_write_once(
     int fd, uintptr_t target, const void *data, size_t len);
@@ -542,7 +551,6 @@ int prepare_p0_pipe_oracle(void);
 int expand_p0_pipe_oracle(void);
 int verify_p0_pipe_oracle_gate(void);
 int verify_p0_pipe_data_page(uintptr_t target, uint64_t expected);
-/* scan_p0_pipe_oracle is static in pipe.c — no header declaration needed. */
 #if defined(APP_PHYS_VIRTUAL_BASE_ORACLE) && APP_PHYS_VIRTUAL_BASE_ORACLE
 uint64_t scan_p0_virtual_base_pointer(void);
 #endif
