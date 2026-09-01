@@ -138,13 +138,13 @@ jobs:
           - target: s25u-kdp
             kmi: android15-6.6
             ddk_image: ghcr.io/ylarod/ddk-min:android15-6.6-20260313
-            kernel_release: 6.6.98-android15-8
+            kernel_release: 6.6.127-android15-8
             cargo_target: aarch64-linux-android35
           # ── Galaxy S25 Ultra (SM-S938N KR)
           - target: pa3q-S938NKSUACZF1-kdp
             kmi: android15-6.6
             ddk_image: ghcr.io/ylarod/ddk-min:android15-6.6-20260313
-            kernel_release: 6.6.98-android15-8
+            kernel_release: 6.6.127-android15-8
             cargo_target: aarch64-linux-android35
           # ── Galaxy A56 5G
           - target: A566EXXSCCZG6-kdp
