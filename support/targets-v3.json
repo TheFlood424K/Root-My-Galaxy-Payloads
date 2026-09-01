@@ -10,6 +10,7 @@
     {
       "payloadId": "galaxy-s25-series-2026-06-07",
       "displayName": "Galaxy S25 series | Kernel 6.6.98",
+      "pipeSzRestricted": true,
       "models": [
         "SM-S9310",
         "SM-S931B",
@@ -56,6 +57,7 @@
     {
       "payloadId": "pa3q-S938NKSUACZF1-perf",
       "displayName": "Galaxy S25 Ultra (SM-S938N) | Kernel 6.6.98 | perf oracle",
+      "pipeSzRestricted": true,
       "models": [
         "SM-S938N"
       ],
@@ -75,6 +77,7 @@
     {
       "payloadId": "pa2q-S9360ZCSCCZG1",
       "displayName": "Galaxy S25+ | Kernel 6.6.98",
+      "pipeSzRestricted": true,
       "models": [
         "SM-S9360"
       ],
@@ -93,6 +96,7 @@
     {
       "payloadId": "psq-S9370ZCS9CZG1",
       "displayName": "Galaxy S25 Edge | Kernel 6.6.98",
+      "pipeSzRestricted": true,
       "models": [
         "SM-S9370"
       ],
