@@ -182,9 +182,10 @@ jobs:
           - { target: e3q-S928BXXS6DZF2,       api: 35, artifact: e3q-S928BXXS6DZF2 }
           - { target: e3q-S928USQS6DZF2,       api: 35, artifact: e3q-S928USQS6DZF2 }
           - { target: essi-A566EXXSCCZG6,      api: 35, artifact: essi-A566EXXSCCZG6 }
-          - { target: essi-S721NKSSCDZF3,      api: 35, artifact: essi-S721NKSSCDZF3 }
+          - { target: essi-S721NKSSCDZF3,      api: 35, artifact: essi-S721NKSSCDZG3 }
           - { target: gts9u-X916BXXS6EZG3,     api: 33, artifact: gts9u-X916BXXS6EZG3 }
           - { target: pa2q-S9360ZCSCCZG1,      api: 35, artifact: pa2q-S9360ZCSCCZG1 }
+          - { target: pa2q-S936U1UEUCZZHL,     api: 35, artifact: pa2q-S936U1UEUCZZHL }
           - { target: pa3q-S9380ZHUBCZF1,      api: 35, artifact: pa3q-S9380ZHUBCZF1 }
           - { target: pa3q-S938NKSUACZF1,      api: 35, artifact: pa3q-S938NKSUACZF1 }
           - { target: pa3q-S938NKSUACZF1,      api: 35, artifact: pa3q-S938NKSUACZF1-perf, oracle: perf_phys }
