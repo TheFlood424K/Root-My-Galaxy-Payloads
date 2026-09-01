@@ -1426,8 +1426,16 @@ uint64_t scan_p0_virtual_base_pointer(void) {
  * restore_slide_boot_id() and repair_fake_fops_llseek(); it is currently
  * unused but reserved for callers that may need kernel-side cleanup.
  *
+ * __attribute__((visibility("default"))): the NDK toolchain defaults to
+ * -fvisibility=hidden for shared libraries, which strips this symbol from
+ * the .dynsym section.  The root helper (libcve43499root.so) resolves this
+ * symbol at runtime via dlopen/dlsym after loading the app payload .so;
+ * without default visibility the dynamic linker cannot find it and reports
+ * "cannot locate symbol restore_p0_oracle_pages".
+ *
  * Returns 1 on success, 0 if any pipe operation fails.
  */
+__attribute__((visibility("default")))
 int restore_p0_oracle_pages(int fd) {
   (void)fd;
 
