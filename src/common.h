@@ -542,7 +542,11 @@ int prepare_p0_pipe_oracle(void);
 int expand_p0_pipe_oracle(void);
 int verify_p0_pipe_oracle_gate(void);
 int verify_p0_pipe_data_page(uintptr_t target, uint64_t expected);
-uintptr_t scan_p0_pipe_oracle(void);
+/* Declaration must match the definition in pipe.c exactly:
+ * static uintptr_t scan_p0_pipe_oracle(int fd, uintptr_t base)
+ * This function is file-scoped (static) so it does not need a header
+ * declaration at all — removing the extern prototype silences the
+ * "static follows non-static declaration" error. */
 #if defined(APP_PHYS_VIRTUAL_BASE_ORACLE) && APP_PHYS_VIRTUAL_BASE_ORACLE
 uint64_t scan_p0_virtual_base_pointer(void);
 #endif
