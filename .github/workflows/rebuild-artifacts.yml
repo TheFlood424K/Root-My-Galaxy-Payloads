@@ -1,0 +1,710 @@
+# Rebuilds exploit .so payloads AND KernelSU binaries from source and commits
+# them back to main.  This file replaces the former rebuild-exploits.yml and
+# rebuild-kernelsu.yml (both deleted in the same commit).
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  Triggers                                                               │
+# │  issues (closed):    exploit-rebuild  → runs exploit matrix only        │
+# │                      kernelsu-rebase  → runs kernelsu matrix only       │
+# │                      both labels     → runs both matrices               │
+# │  workflow_dispatch:  choose which suite(s) to run via 'suite' input     │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Build host must be linux-x86_64 so NDK clang is executable.
+
+name: Rebuild artifacts
+
+on:
+  issues:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Which suite to build'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - exploits
+          - kernelsu
+      targets:
+        description: >
+          (exploits only) Space-separated artifact names to rebuild.
+          Leave blank to rebuild ALL exploit targets.
+        required: false
+        default: ''
+      ksu_tag:
+        description: '(kernelsu only) KernelSU tag to build — leave empty for latest'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuild even if nothing changed'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+  issues: read
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE — decide which suites to run, and resolve KSU tag
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run_exploits:  ${{ steps.decide.outputs.run_exploits }}
+      run_kernelsu:  ${{ steps.decide.outputs.run_kernelsu }}
+      ksu_tag:       ${{ steps.resolve.outputs.ksu_tag }}
+      ksu_commit:    ${{ steps.resolve.outputs.ksu_commit }}
+      current_tag:   ${{ steps.pinned.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Decide which suites to run
+        id: decide
+        env:
+          EVENT:        ${{ github.event_name }}
+          ISSUE_LABELS: ${{ toJson(github.event.issue.labels) }}
+          SUITE:        ${{ inputs.suite }}
+          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          run_exploits=false
+          run_kernelsu=false
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            case "$SUITE" in
+              both)      run_exploits=true; run_kernelsu=true ;;
+              exploits)  run_exploits=true ;;
+              kernelsu)  run_kernelsu=true ;;
+            esac
+            echo "Manual dispatch (suite=$SUITE)."
+          else
+            # issues event
+            HAS_EXPLOIT=$(echo "$ISSUE_LABELS"   | jq -r '[.[].name] | index("exploit-rebuild")   != null')
+            HAS_KSU=$(echo "$ISSUE_LABELS"        | jq -r '[.[].name] | index("kernelsu-rebase")  != null')
+
+            if [ "$HAS_EXPLOIT" = "true" ]; then
+              run_exploits=true
+              echo "exploit-rebuild label detected."
+            fi
+
+            if [ "$HAS_KSU" = "true" ]; then
+              # Guard: abort KSU build if another rebase issue is still open
+              OPEN=$(gh issue list \
+                --repo "$GITHUB_REPOSITORY" \
+                --state open \
+                --label "kernelsu-rebase" \
+                --json number \
+                --jq 'length')
+              if [ "$OPEN" != "0" ]; then
+                echo "$OPEN open kernelsu-rebase issue(s) still exist — skipping KSU suite."
+              else
+                run_kernelsu=true
+                echo "kernelsu-rebase label detected and no open issues remain."
+              fi
+            fi
+
+            if [ "$run_exploits" = "false" ] && [ "$run_kernelsu" = "false" ]; then
+              echo "Issue closed but carries neither exploit-rebuild nor kernelsu-rebase — skipping."
+            fi
+          fi
+
+          echo "run_exploits=$run_exploits" >> "$GITHUB_OUTPUT"
+          echo "run_kernelsu=$run_kernelsu" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve target KernelSU tag
+        id: resolve
+        if: steps.decide.outputs.run_kernelsu == 'true'
+        env:
+          INPUT_TAG: ${{ inputs.ksu_tag }}
+        run: |
+          TAG="${INPUT_TAG:-}"
+          if [ -z "$TAG" ]; then
+            TAG=$(curl -fsSL https://api.github.com/repos/tiann/KernelSU/releases/latest \
+                  | jq -r '.tag_name')
+          fi
+          TYPE=$(curl -fsSL "https://api.github.com/repos/tiann/KernelSU/git/refs/tags/${TAG}" \
+                 | jq -r '.object.type')
+          SHA=$(curl -fsSL "https://api.github.com/repos/tiann/KernelSU/git/refs/tags/${TAG}" \
+                | jq -r '.object.sha')
+          if [ "$TYPE" = "tag" ]; then
+            SHA=$(curl -fsSL "https://api.github.com/repos/tiann/KernelSU/git/tags/${SHA}" \
+                  | jq -r '.object.sha')
+          fi
+          echo "ksu_tag=$TAG"    >> "$GITHUB_OUTPUT"
+          echo "ksu_commit=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Building KSU: $TAG @ $SHA"
+
+      - name: Read pinned KSU tag
+        id: pinned
+        if: steps.decide.outputs.run_kernelsu == 'true'
+        run: |
+          CURRENT=$(grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' kernelsu/README.md | head -1 || echo "none")
+          echo "tag=$CURRENT" >> "$GITHUB_OUTPUT"
+
+      - name: Skip KSU if already current (non-forced dispatch)
+        if: |
+          steps.decide.outputs.run_kernelsu == 'true'
+          && steps.resolve.outputs.ksu_tag == steps.pinned.outputs.tag
+          && inputs.force != 'true'
+          && github.event_name == 'workflow_dispatch'
+        run: |
+          echo "Already at ${{ steps.resolve.outputs.ksu_tag }} — set force=true to override."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPLOIT BUILD MATRIX
+# ─────────────────────────────────────────────────────────────────────────────
+  build-exploits:
+    needs: gate
+    if: needs.gate.outputs.run_exploits == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: a15-A155NKSS6BYH1,       api: 35, artifact: a15-A155NKSS6BYH1 }
+          - { target: a36xq-A366WVLS3AYG1,     api: 35, artifact: a36xq-A366WVLS3AYG1 }
+          - { target: a53x-A536EXXSNGZG3,      api: 31, artifact: a53x-A536EXXSNGZG3 }
+          - { target: dm1q-S911U1UES6DYI3,     api: 33, artifact: dm1q-S911U1UES6DYI3 }
+          - { target: dm2q-S916BXXSAFZG1,      api: 33, artifact: dm2q-S916BXXSAFZG1 }
+          - { target: dm3q-S9180ZHS8FZF5,      api: 33, artifact: dm3q-S9180ZHS8FZF5 }
+          - { target: dm3q-S918BXXSAFZF5,      api: 33, artifact: dm3q-S918BXXSAFZF5 }
+          - { target: e1s-S921BXXSFDZE1,       api: 35, artifact: e1s-S921BXXSFDZE1 }
+          - { target: e1s-S921BXXSFDZF2,       api: 35, artifact: e1s-S921BXXSFDZF2 }
+          - { target: e1s-S921NKSSFDZF3,       api: 35, artifact: e1s-S921NKSSFDZF3 }
+          - { target: e2s-S926BXXUEDZDR,       api: 35, artifact: e2s-S926BXXUEDZDR }
+          - { target: e3q-S928BXXS6DZF2,       api: 35, artifact: e3q-S928BXXS6DZF2 }
+          - { target: e3q-S928USQS6DZF2,       api: 35, artifact: e3q-S928USQS6DZF2 }
+          - { target: essi-A566EXXSCCZG6,      api: 35, artifact: essi-A566EXXSCCZG6 }
+          - { target: essi-S721NKSSCDZF3,      api: 35, artifact: essi-S721NKSSCDZF3 }
+          - { target: gts9u-X916BXXS6EZG3,     api: 33, artifact: gts9u-X916BXXS6EZG3 }
+          - { target: pa2q-S9360ZCSCCZG1,      api: 35, artifact: pa2q-S9360ZCSCCZG1 }
+          - { target: pa3q-S9380ZHUBCZF1,      api: 35, artifact: pa3q-S9380ZHUBCZF1 }
+          - { target: pa3q-S938NKSUACZF1,      api: 35, artifact: pa3q-S938NKSUACZF1 }
+          - { target: pa3q-S938NKSUACZF1,      api: 35, artifact: pa3q-S938NKSUACZF1-perf, oracle: perf_phys }
+          - { target: psq-S9370ZCS9CZG1,       api: 35, artifact: psq-S9370ZCS9CZG1 }
+          - { target: q7q-F966BXXSBBZG3,       api: 35, artifact: q7q-F966BXXSBBZG3 }
+          - { target: q7q-F966USQSBBZG3,       api: 35, artifact: q7q-F966USQSBBZG3 }
+          - { target: q7q-F966USQU9BZDN,       api: 35, artifact: q7q-F966USQU9BZDN }
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Filter — skip if not in requested target list
+        if: inputs.targets != ''
+        env:
+          REQUESTED: ${{ inputs.targets }}
+          ARTIFACT:  ${{ matrix.artifact }}
+        run: |
+          if ! echo " ${REQUESTED} " | grep -qw "${ARTIFACT}"; then
+            echo "::notice::Skipping ${ARTIFACT} (not in requested list)."
+            echo "SKIP_BUILD=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install Android NDK
+        if: env.SKIP_BUILD != '1'
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29
+          add-to-path: true
+          local-cache: true
+
+      - name: Cache Android NDK
+        if: env.SKIP_BUILD != '1'
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup-ndk.outputs.ndk-path }}
+          key: ndk-r29
+
+      - name: Fix NDK clang symlink (r27+)
+        if: env.SKIP_BUILD != '1'
+        run: |
+          NDK_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          VERSIONED=$(ls "${NDK_BIN}/clang-"[0-9]* 2>/dev/null | head -1)
+          if [ -n "${VERSIONED}" ]; then
+            ln -sf "${VERSIONED}" "${NDK_BIN}/clang"
+            echo "Symlink: clang -> $(basename ${VERSIONED})"
+          else
+            echo "::error::No versioned clang found in NDK bin"; exit 1
+          fi
+          if [ ! -f "${NDK_BIN}/ld.lld" ]; then
+            if [ -f "${NDK_BIN}/lld" ]; then
+              ln -sf "${NDK_BIN}/lld" "${NDK_BIN}/ld.lld"
+              echo "Symlink: ld.lld -> lld"
+            else
+              echo "::error::No lld found in NDK bin"; exit 1
+            fi
+          fi
+
+      - name: Build exploit .so
+        if: env.SKIP_BUILD != '1'
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          TARGET:           ${{ matrix.target }}
+          API:              ${{ matrix.api }}
+          ORACLE:           ${{ matrix.oracle }}
+        run: |
+          export PATH="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
+          if [ -n "${ORACLE:-}" ]; then
+            make TARGET="${TARGET}" API="${API}" ORACLE="${ORACLE}" FIRMWARE="${TARGET##*-}"
+          else
+            make TARGET="${TARGET}" API="${API}"
+          fi
+          ls -la "build/${TARGET}/"
+
+      - name: Verify and stage artifact
+        if: env.SKIP_BUILD != '1'
+        env:
+          TARGET:   ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          SO="build/${TARGET}/cve-2026-43499-app.so"
+          DEST="artifacts/${ARTIFACT}/cve-2026-43499-app.so"
+          EXPECTED=$(python3 - <<PYEOF
+          import json
+          with open('support/targets-v3.json') as f:
+              data = json.load(f)
+          for p in data['payloads']:
+              url = p.get('exploit', {}).get('url', '')
+              if url.endswith('artifacts/${ARTIFACT}/cve-2026-43499-app.so'):
+                  print(p['exploit']['size'])
+                  break
+          PYEOF
+          )
+          ACTUAL=$(stat -c %s "${SO}")
+          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+            echo "::warning::Size changed ${EXPECTED} → ${ACTUAL} for ${ARTIFACT}. targets-v3.json will be updated."
+          fi
+          mkdir -p "artifacts/${ARTIFACT}"
+          cp "${SO}" "${DEST}"
+          echo "Staged: ${DEST}"
+
+      - name: Upload artifact
+        if: env.SKIP_BUILD != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: exploit-${{ matrix.artifact }}
+          path: artifacts/${{ matrix.artifact }}/cve-2026-43499-app.so
+          retention-days: 7
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KERNELSU BUILD MATRIX
+# ─────────────────────────────────────────────────────────────────────────────
+  build-kernelsu:
+    needs: gate
+    if: needs.gate.outputs.run_kernelsu == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: s25u-kdp,                    kmi: android15-6.6,  ddk_image: "ghcr.io/ylarod/ddk-min:android15-6.6-20260313",  kernel_release: 6.6.127-android15-8,                               cargo_target: aarch64-linux-android35 }
+          - { target: pa3q-S938NKSUACZF1-kdp,      kmi: android15-6.6,  ddk_image: "ghcr.io/ylarod/ddk-min:android15-6.6-20260313",  kernel_release: 6.6.127-android15-8,                               cargo_target: aarch64-linux-android35 }
+          - { target: A566EXXSCCZG6-kdp,            kmi: android15-6.6,  ddk_image: "ghcr.io/ylarod/ddk-min:android15-6.6-20260313",  kernel_release: 6.6.102-android15-8,                               cargo_target: aarch64-linux-android35 }
+          - { target: A366WVLS3AYG1-kdp,            kmi: android15-6.6,  ddk_image: "ghcr.io/ylarod/ddk-min:android15-6.6-20260313",  kernel_release: 6.6.46-android15-8,                                cargo_target: aarch64-linux-android35 }
+          - { target: e3q-S928USQS6DZF2-kdp,        kmi: android14-6.1,  ddk_image: "ghcr.io/ylarod/ddk-min:android14-6.1-20260313",  kernel_release: 6.1.145-android14-11-33419968-abS928USQS6DZF2,  cargo_target: aarch64-linux-android35 }
+          - { target: e3q-S928BXXS6DZF2-kdp,        kmi: android14-6.1,  ddk_image: "ghcr.io/ylarod/ddk-min:android14-6.1-20260313",  kernel_release: 6.1.145-android14-11,                             cargo_target: aarch64-linux-android35 }
+          - { target: e2s-S926BXXUEDZDR-kdp,        kmi: android14-6.1,  ddk_image: "ghcr.io/ylarod/ddk-min:android14-6.1-20260313",  kernel_release: 6.1.157-android14-11,                             cargo_target: aarch64-linux-android35 }
+          - { target: e1s-S921BXXSFDZE1-kdp,        kmi: android14-6.1,  ddk_image: "ghcr.io/ylarod/ddk-min:android14-6.1-20260313",  kernel_release: 6.1.157-android14-11,                             cargo_target: aarch64-linux-android35 }
+          - { target: e1s-S921BXXSFDZF2-kdp,        kmi: android14-6.1,  ddk_image: "ghcr.io/ylarod/ddk-min:android14-6.1-20260313",  kernel_release: 6.1.157-android14-11,                             cargo_target: aarch64-linux-android35 }
+          - { target: e1s-S921NKSSFDZF3-kdp,        kmi: android14-6.1,  ddk_image: "ghcr.io/ylarod/ddk-min:android14-6.1-20260313",  kernel_release: 6.1.157-android14-11,                             cargo_target: aarch64-linux-android35 }
+          - { target: dm3q-S9180ZHS8FZF5-kdp,      kmi: android13-5.15, ddk_image: "ghcr.io/ylarod/ddk-min:android13-5.15-20260313", kernel_release: 5.15.189-android13-8,                             cargo_target: aarch64-linux-android33 }
+          - { target: dm3q-S918BXXSAFZF5-kdp,      kmi: android13-5.15, ddk_image: "ghcr.io/ylarod/ddk-min:android13-5.15-20260313", kernel_release: 5.15.189-android13-8,                             cargo_target: aarch64-linux-android33 }
+          - { target: dm1q-S911U1UES6DYI3-kdp,     kmi: android13-5.15, ddk_image: "ghcr.io/ylarod/ddk-min:android13-5.15-20260313", kernel_release: 5.15.153-android13-8,                             cargo_target: aarch64-linux-android33 }
+          - { target: A536EXXSNGZG3-kdp,            kmi: android12-5.10, ddk_image: "ghcr.io/ylarod/ddk-min:android12-5.10-20260313", kernel_release: 5.10.237-android12-9,                             cargo_target: aarch64-linux-android31 }
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29
+          add-to-path: true
+          local-cache: true
+
+      - name: Cache Android NDK
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/ndk/r29
+          key: ndk-r29
+
+      - name: Fix NDK clang symlink (r27+)
+        run: |
+          NDK_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          VERSIONED=$(ls "${NDK_BIN}/clang-"[0-9]* 2>/dev/null | head -1)
+          if [ -n "${VERSIONED}" ]; then
+            ln -sf "${VERSIONED}" "${NDK_BIN}/clang"
+            echo "Symlink: clang -> $(basename ${VERSIONED})"
+          else
+            echo "::error::No versioned clang found in NDK bin"; exit 1
+          fi
+          if [ ! -f "${NDK_BIN}/ld.lld" ]; then
+            if [ -f "${NDK_BIN}/lld" ]; then
+              ln -sf "${NDK_BIN}/lld" "${NDK_BIN}/ld.lld"
+              echo "Symlink: ld.lld -> lld"
+            else
+              echo "::error::No lld found in NDK bin"; exit 1
+            fi
+          fi
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ hashFiles('KernelSU/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      - name: Cache Cargo build artifacts
+        uses: actions/cache@v4
+        with:
+          path: KernelSU/target
+          key: cargo-build-${{ matrix.cargo_target }}-${{ hashFiles('KernelSU/Cargo.lock') }}
+          restore-keys: cargo-build-${{ matrix.cargo_target }}-
+
+      - name: Checkout KernelSU at target tag
+        uses: actions/checkout@v4
+        with:
+          repository: tiann/KernelSU
+          ref: ${{ needs.gate.outputs.ksu_tag }}
+          path: KernelSU
+          submodules: recursive
+          fetch-depth: 0
+          lfs: true
+
+      - name: Apply Samsung patch
+        env:
+          KSU_TAG: ${{ needs.gate.outputs.ksu_tag }}
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE}"
+          PATCH="${WS}/kernelsu/patches/KernelSU-${KSU_TAG}-samsung-kdp-rkp-defex.patch"
+
+          fail_with_rebase_instructions() {
+            local failed_patch="$1" dry_out="$2"
+            local patch_basename; patch_basename=$(basename "${failed_patch}")
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  MANUAL REBASE REQUIRED — patch cannot apply to ${KSU_TAG}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "▶ Patch:  ${patch_basename}"
+            echo "▶ Target: tiann/KernelSU @ ${KSU_TAG}"
+            echo ""
+            echo "── Failed hunks ─────────────────────────────────────────────"
+            echo "${dry_out}" | grep -E "FAILED|patching file|Hunk" || echo "(none captured)"
+            echo ""
+            echo "── Full dry-run output ──────────────────────────────────────"
+            echo "${dry_out}"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  HOW TO FIX — Option A: PowerShell / Git Bash"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            cat <<'PWSH'
+          git clone https://github.com/tiann/KernelSU.git --branch ${KSU_TAG} --depth 1
+          git clone https://github.com/TheFlood424K/Root-My-Galaxy-Payloads.git
+          cd KernelSU
+          patch -p1 --dry-run < "../Root-My-Galaxy-Payloads/kernelsu/patches/${patch_basename}"
+          patch -p1 --reject-file=samsung.rej < "../Root-My-Galaxy-Payloads/kernelsu/patches/${patch_basename}"
+          # Fix each *.rej hunk, then:
+          git diff HEAD > "../Root-My-Galaxy-Payloads/kernelsu/patches/${patch_basename}"
+          cd ../Root-My-Galaxy-Payloads
+          git add kernelsu/patches/${patch_basename}
+          git commit -m "fix: rebase Samsung patch onto ${KSU_TAG}"
+          git push
+          PWSH
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  HOW TO FIX — Option B: GitHub web UI"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  1. Edit: https://github.com/TheFlood424K/Root-My-Galaxy-Payloads/edit/main/kernelsu/patches/${patch_basename}"
+            echo "  2. Compare with KernelSU source at https://github.com/tiann/KernelSU/tree/${KSU_TAG}"
+            echo "  3. Fix each failed hunk's context lines and @@ offsets."
+            echo "  4. Commit directly to main."
+            echo "  5. Re-run this workflow."
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "::error::Manual rebase required for ${patch_basename} against ${KSU_TAG}."
+            exit 1
+          }
+
+          samsung_upstream_status() {
+            local prev_patch="$1" dry_out
+            dry_out=$(patch -p1 --forward --dry-run < "${prev_patch}" 2>&1 || true)
+            local failed reversed
+            failed=$(echo "${dry_out}"   | grep -c "FAILED"                                        || true)
+            reversed=$(echo "${dry_out}" | grep -c "Reversed\|already exists\|previously applied" || true)
+            echo "::debug::samsung_upstream_status failed=${failed} reversed=${reversed}"
+            if [ "${failed}" -gt 0 ]; then
+              echo "::warning::Patch $(basename ${prev_patch}) has ${failed} FAILED hunk(s)."
+              echo "${dry_out}" > /tmp/samsung_dry_out_last
+              return 2
+            fi
+            echo "" > /tmp/samsung_dry_out_last
+            [ "${reversed}" -gt 0 ] && return 0
+            return 1
+          }
+
+          USE_PREV=false
+          if [ -f "${PATCH}" ] && [ -s "${PATCH}" ]; then
+            cd "${WS}/KernelSU"
+            samsung_upstream_status "${PATCH}" || true
+            VERSIONED_STATUS=$?
+            cd "${WS}"
+            [ "${VERSIONED_STATUS}" -eq 2 ] && USE_PREV=true
+          fi
+
+          if [ ! -f "${PATCH}" ] || [ ! -s "${PATCH}" ] || [ "${USE_PREV}" = "true" ]; then
+            PREV_PATCH=$(ls -1 "${WS}/kernelsu/patches/KernelSU-v"*"-samsung-kdp-rkp-defex.patch" \
+              2>/dev/null | grep -v "KernelSU-${KSU_TAG}-" | xargs -r grep -l . | sort -V | tail -1)
+            [ -z "${PREV_PATCH}" ] && { echo "::error::No previous Samsung patch found."; exit 1; }
+            echo "Rebasing previous patch onto ${KSU_TAG}: ${PREV_PATCH}"
+            cd "${WS}/KernelSU"
+            samsung_upstream_status "${PREV_PATCH}" || true
+            STATUS=$?
+            if [ "${STATUS}" -eq 2 ]; then
+              fail_with_rebase_instructions "${PREV_PATCH}" "$(cat /tmp/samsung_dry_out_last)"
+            fi
+            if [ "${STATUS}" -eq 0 ]; then
+              echo "Samsung changes fully merged upstream — writing sentinel."
+              touch "${PATCH}"; cd "${WS}"; exit 0
+            fi
+            patch -p1 --forward --reject-file=- < "${PREV_PATCH}" || {
+              echo "::error::Unexpected apply failure."; exit 1;
+            }
+            git diff HEAD > "${PATCH}"
+            git checkout -- .
+            cd "${WS}"
+            echo "Generated ${PATCH}"
+          fi
+
+          [ ! -s "${PATCH}" ] && { echo "Sentinel patch — nothing to apply."; exit 0; }
+
+          echo "Applying ${PATCH} to KernelSU ${KSU_TAG}"
+          cd "${WS}/KernelSU"
+          samsung_upstream_status "${PATCH}" || true
+          APPLY_STATUS=$?
+          [ "${APPLY_STATUS}" -eq 2 ] && fail_with_rebase_instructions "${PATCH}" "$(cat /tmp/samsung_dry_out_last)"
+          [ "${APPLY_STATUS}" -eq 0 ] && { echo "Already applied — skipping."; exit 0; }
+          patch -p1 --forward --reject-file=- < "${PATCH}" || \
+            fail_with_rebase_instructions "${PATCH}" "$(patch -p1 --forward --dry-run < ${PATCH} 2>&1 || true)"
+          echo "Patch applied successfully."
+
+      - name: Build .ko inside DDK container
+        env:
+          KMI:            ${{ matrix.kmi }}
+          KERNEL_RELEASE: ${{ matrix.kernel_release }}
+          DDK_IMAGE:      ${{ matrix.ddk_image }}
+        run: |
+          mkdir -p out
+          docker run --rm \
+            -e KERNEL_RELEASE="${KERNEL_RELEASE}" \
+            -v "$PWD/KernelSU:/workspace" \
+            -w /workspace \
+            "$DDK_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              find "$KDIR/include/generated" "$KDIR/include/config" \
+                \( -name "utsrelease.h" -o -name "kernel.release" \) 2>/dev/null \
+                | xargs -r sed -i "s|[0-9][^ \"]*dirty|${KERNEL_RELEASE}|g"
+              make -C "$KDIR" M="$PWD/kernel" src="$PWD/kernel" \
+                ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                CONFIG_KSU=m CONFIG_KSU_SAMSUNG_KDP=y CONFIG_KSU_SAMSUNG_RKP=y \
+                CONFIG_KSU_SAMSUNG_DEFEX=y KBUILD_MODPOST_WARN=1 modules
+              modinfo kernel/kernelsu.ko
+              llvm-strip -d kernel/kernelsu.ko
+            '
+          cp KernelSU/kernel/kernelsu.ko "out/${{ matrix.kmi }}_kernelsu-${{ matrix.target }}.ko"
+
+      - name: Install libclang
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang libclang-dev llvm-dev
+
+      - name: Build ksud
+        env:
+          CARGO_TARGET: ${{ matrix.cargo_target }}
+          ANDROID_NDK:  ${{ steps.setup-ndk.outputs.ndk-path }}
+          KMI:          ${{ matrix.kmi }}
+        run: |
+          NDK_BIN="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="${NDK_BIN}:${PATH}"
+          export LIBCLANG_PATH="$(llvm-config --libdir)"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK_BIN}/${CARGO_TARGET}-clang"
+          export CC_aarch64_linux_android="${NDK_BIN}/${CARGO_TARGET}-clang"
+          export AR_aarch64_linux_android="${NDK_BIN}/llvm-ar"
+          cp "out/${KMI}_kernelsu-${{ matrix.target }}.ko" \
+             "KernelSU/userspace/ksud/bin/aarch64/${KMI}_kernelsu.ko"
+          cd KernelSU
+          cargo build --release --target aarch64-linux-android -p ksud
+          cp "${GITHUB_WORKSPACE}/KernelSU/target/aarch64-linux-android/release/ksud" \
+             "${GITHUB_WORKSPACE}/out/ksud-${{ matrix.target }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ksud-${{ matrix.target }}
+          path: |
+            out/ksud-${{ matrix.target }}
+            out/${{ matrix.kmi }}_kernelsu-${{ matrix.target }}.ko
+          retention-days: 7
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMMIT — runs after whichever build jobs completed
+# ─────────────────────────────────────────────────────────────────────────────
+  commit:
+    needs: [gate, build-exploits, build-kernelsu]
+    # Run if at least one suite ran (the other will be skipped, not failed)
+    if: |
+      always()
+      && (needs.gate.outputs.run_exploits == 'true' || needs.gate.outputs.run_kernelsu == 'true')
+      && (needs.build-exploits.result == 'success' || needs.build-exploits.result == 'skipped')
+      && (needs.build-kernelsu.result == 'success' || needs.build-kernelsu.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download exploit artifacts
+        if: needs.gate.outputs.run_exploits == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts-dl/exploits
+          pattern: exploit-*
+          merge-multiple: false
+
+      - name: Download KernelSU artifacts
+        if: needs.gate.outputs.run_kernelsu == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts-dl/kernelsu
+          merge-multiple: true
+          pattern: ksud-*
+
+      - name: Stage exploit .so files and update sizes
+        if: needs.gate.outputs.run_exploits == 'true'
+        run: |
+          set -euo pipefail
+          for dir in artifacts-dl/exploits/exploit-*/; do
+            artifact="${dir#artifacts-dl/exploits/exploit-}"; artifact="${artifact%/}"
+            so="${dir}cve-2026-43499-app.so"
+            [ -f "${so}" ] || { echo "::warning::No .so in ${dir} — skipping."; continue; }
+            dest="artifacts/${artifact}/cve-2026-43499-app.so"
+            mkdir -p "artifacts/${artifact}"
+            cp "${so}" "${dest}"
+            echo "  artifacts/${artifact}/: $(stat -c %s ${dest}) bytes"
+          done
+
+          python3 - <<'PYEOF'
+          import json, os
+          with open('support/targets-v3.json') as f:
+              data = json.load(f)
+          changed = []
+          for p in data['payloads']:
+              url = p.get('exploit', {}).get('url', '')
+              idx = url.find('artifacts/')
+              if idx == -1:
+                  continue
+              rel = url[idx:]
+              if os.path.isfile(rel):
+                  new_size = os.path.getsize(rel)
+                  if new_size != p['exploit'].get('size', -1):
+                      changed.append(p['payloadId'])
+                  p['exploit']['size'] = new_size
+          with open('support/targets-v3.json', 'w') as f:
+              json.dump(data, f, indent=2); f.write('\n')
+          print(f"Updated {len(changed)} exploit size(s)." if changed else "Exploit sizes unchanged.")
+          PYEOF
+
+      - name: Stage KernelSU binaries and update metadata
+        if: needs.gate.outputs.run_kernelsu == 'true'
+        env:
+          KSU_TAG:    ${{ needs.gate.outputs.ksu_tag }}
+          KSU_COMMIT: ${{ needs.gate.outputs.ksu_commit }}
+        run: |
+          set -euo pipefail
+          for f in artifacts-dl/kernelsu/ksud-*; do
+            cp "$f" "kernelsu/$(basename $f)"
+            echo "  kernelsu/$(basename $f): $(stat -c %s kernelsu/$(basename $f)) bytes"
+          done
+          for f in artifacts-dl/kernelsu/*.ko; do
+            [ -f "$f" ] || continue
+            cp "$f" "kernelsu/$(basename $f)"
+            echo "  kernelsu/$(basename $f): $(stat -c %s kernelsu/$(basename $f)) bytes"
+          done
+
+          sed -i \
+            "s|KernelSU \`v[0-9]\+\.[0-9]\+\.[0-9]\+\`, commit|KernelSU \`${KSU_TAG}\`, commit|" \
+            kernelsu/README.md
+          sed -i \
+            "s|\`[0-9a-f]\{40\}\`|\`${KSU_COMMIT}\`|" \
+            kernelsu/README.md
+
+          python3 - <<'PYEOF'
+          import json, os, re, urllib.request
+          with open('support/targets-v3.json') as f:
+              data = json.load(f)
+          for payload in data['payloads']:
+              ksu = payload.get('kernelsu', {})
+              fname = ksu.get('url', '').split('/')[-1]
+              local = os.path.join('kernelsu', fname)
+              if os.path.isfile(local):
+                  ksu['size'] = os.path.getsize(local)
+          meta = json.loads(urllib.request.urlopen(
+              'https://api.github.com/repos/tiann/KernelSU/releases/latest'
+          ).read())
+          apk = next((a for a in meta['assets'] if a['name'].endswith('-release.apk')), None)
+          if apk:
+              vc = re.search(r'_(\d+)-release', apk['name'])
+              data['kernelsuManager'] = {
+                  'version':             meta['tag_name'],
+                  'versionCode':         int(vc.group(1)) if vc else 0,
+                  'latestReleaseApiUrl': 'https://api.github.com/repos/tiann/KernelSU/releases/latest',
+                  'apkUrl':              apk['browser_download_url'],
+              }
+          with open('support/targets-v3.json', 'w') as f:
+              json.dump(data, f, indent=2); f.write('\n')
+          PYEOF
+
+      - name: Commit and push
+        env:
+          RUN_EXPLOITS: ${{ needs.gate.outputs.run_exploits }}
+          RUN_KSU:      ${{ needs.gate.outputs.run_kernelsu }}
+          KSU_TAG:      ${{ needs.gate.outputs.ksu_tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ "$RUN_EXPLOITS" = "true" ]; then git add artifacts/ support/targets-v3.json; fi
+          if [ "$RUN_KSU" = "true" ];      then git add kernelsu/ support/targets-v3.json; fi
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit — artifacts already up to date."
+          else
+            if   [ "$RUN_EXPLOITS" = "true" ] && [ "$RUN_KSU" = "true" ]; then
+              MSG="artifact: rebuild exploit + KernelSU ${KSU_TAG} artifacts"
+            elif [ "$RUN_EXPLOITS" = "true" ]; then
+              MSG="artifact: rebuild exploit .so artifacts from source"
+            else
+              MSG="chore: rebuild KernelSU binaries for ${KSU_TAG}"
+            fi
+            git commit -m "${MSG}"
+            git push origin HEAD:main
+          fi
