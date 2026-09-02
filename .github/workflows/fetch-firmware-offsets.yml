@@ -1,0 +1,422 @@
+# Fetches the Samsung AP firmware for a target using samloader (Python port of
+# SamFirm_Reborn), extracts the vendor_dlkm image, mounts it, reads symbol
+# offsets from the relevant .ko files, and commits the updated target.h back to
+# main so the rebuild-artifacts workflow can consume it.
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  Triggers                                                               │
+# │  workflow_dispatch:  manual run, one target at a time                  │
+# │  issues (closed):   firmware-fetch label → runs for default target     │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Secrets required: none (Samsung FUS is unauthenticated for latest firmware)
+# Permissions: contents:write
+
+name: Fetch firmware offsets
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Samsung model number (e.g. SM-S936U1)'
+        required: false
+        default: 'SM-S936U1'
+      region:
+        description: 'Region / CSC (e.g. XAA, UCH)'
+        required: false
+        default: 'XAA'
+      firmware_version:
+        description: >
+          Full PDA/firmware version string (e.g. S936U1UEUCZZHL).
+          Leave blank to fetch the latest available version.
+        required: false
+        default: ''
+      target:
+        description: >
+          Build-system target name inside src/targets/ (e.g. pa2q-S936U1UEUCZZHL).
+          Must match the directory that contains target.h.
+        required: false
+        default: 'pa2q-S936U1UEUCZZHL'
+      auto_trigger_rebuild:
+        description: 'Open an exploit-rebuild issue after committing so rebuild-artifacts runs automatically'
+        required: false
+        default: 'true'
+        type: boolean
+  issues:
+    types: [closed]
+
+permissions:
+  contents: write
+  issues: write
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE — decide whether to run and resolve firmware version
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run:              ${{ steps.decide.outputs.run }}
+      model:            ${{ steps.resolve.outputs.model }}
+      region:           ${{ steps.resolve.outputs.region }}
+      firmware_version: ${{ steps.resolve.outputs.firmware_version }}
+      target:           ${{ steps.resolve.outputs.target }}
+      auto_trigger:     ${{ steps.resolve.outputs.auto_trigger }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Decide whether to run
+        id: decide
+        env:
+          EVENT:        ${{ github.event_name }}
+          ISSUE_LABELS: ${{ toJson(github.event.issue.labels) }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            HAS=$(echo "$ISSUE_LABELS" | jq -r '[.[].name] | index("firmware-fetch") != null')
+            echo "run=$HAS" >> "$GITHUB_OUTPUT"
+            [ "$HAS" != "true" ] && echo "No firmware-fetch label — skipping."
+          fi
+
+      - name: Resolve parameters
+        id: resolve
+        if: steps.decide.outputs.run == 'true'
+        env:
+          INPUT_MODEL:    ${{ inputs.model }}
+          INPUT_REGION:   ${{ inputs.region }}
+          INPUT_FW:       ${{ inputs.firmware_version }}
+          INPUT_TARGET:   ${{ inputs.target }}
+          INPUT_TRIGGER:  ${{ inputs.auto_trigger_rebuild }}
+          EVENT:          ${{ github.event_name }}
+        run: |
+          # For issues-triggered runs use hardcoded defaults for the S936U1
+          if [ "$EVENT" = "issues" ]; then
+            MODEL="SM-S936U1"
+            REGION="XAA"
+            FW=""
+            TARGET="pa2q-S936U1UEUCZZHL"
+            TRIGGER="true"
+          else
+            MODEL="${INPUT_MODEL:-SM-S936U1}"
+            REGION="${INPUT_REGION:-XAA}"
+            FW="${INPUT_FW:-}"
+            TARGET="${INPUT_TARGET:-pa2q-S936U1UEUCZZHL}"
+            TRIGGER="${INPUT_TRIGGER:-true}"
+          fi
+
+          # If no explicit firmware version, query Samsung FUS via samloader
+          if [ -z "$FW" ]; then
+            pip install --quiet samloader
+            FW=$(python3 -c "
+          import samloader.main as s
+          import asyncio
+          async def get():
+              async with s.SamloaderClient() as c:
+                  v = await c.get_latest_version('$MODEL', '$REGION')
+                  print(v['version'])
+          asyncio.run(get())
+          " 2>/dev/null || echo "")
+            echo "Latest firmware version resolved: $FW"
+          fi
+
+          if [ -z "$FW" ]; then
+            echo "::error::Could not resolve firmware version for $MODEL/$REGION"
+            exit 1
+          fi
+
+          echo "model=$MODEL"    >> "$GITHUB_OUTPUT"
+          echo "region=$REGION"  >> "$GITHUB_OUTPUT"
+          echo "firmware_version=$FW" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET"  >> "$GITHUB_OUTPUT"
+          echo "auto_trigger=$TRIGGER" >> "$GITHUB_OUTPUT"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FETCH — download AP, extract modules, derive offsets, update target.h
+# ─────────────────────────────────────────────────────────────────────────────
+  fetch:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      MODEL:    ${{ needs.gate.outputs.model }}
+      REGION:   ${{ needs.gate.outputs.region }}
+      FW:       ${{ needs.gate.outputs.firmware_version }}
+      TARGET:   ${{ needs.gate.outputs.target }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            lz4 \
+            android-sdk-libsparse-utils \
+            python3-pip \
+            jq
+
+      - name: Install samloader
+        run: pip install --quiet samloader
+
+      # ── Step 1: Check version and decide whether to skip ──────────────────
+      - name: Check firmware version vs current target.h
+        id: check
+        run: |
+          HEADER="src/targets/${TARGET}/target.h"
+          if [ ! -f "$HEADER" ]; then
+            echo "::error::target.h not found at $HEADER"
+            exit 1
+          fi
+          PINNED=$(grep -oP '(?<=FIRMWARE_VERSION\s")[^"]+' "$HEADER" || echo "")
+          echo "Pinned:    $PINNED"
+          echo "Requested: $FW"
+          if [ "$PINNED" = "$FW" ]; then
+            echo "::notice::target.h already at $FW — nothing to do."
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          else
+            echo "SKIP=0" >> "$GITHUB_ENV"
+          fi
+
+      # ── Step 2: Download AP partition only ────────────────────────────────
+      - name: Download AP firmware (samloader)
+        if: env.SKIP != '1'
+        run: |
+          mkdir -p fw_dl
+          # samloader CLI: check → decrypt → download AP only
+          # The `-O` flag writes to the specified output directory.
+          # We use --type AP to skip BL/CP/CSC/HOME_CSC (saves ~10 GB).
+          python3 - <<PYEOF
+          import asyncio, os, sys
+          import samloader.main as s
+
+          MODEL  = os.environ["MODEL"]
+          REGION = os.environ["REGION"]
+          FW     = os.environ["FW"]
+          OUTDIR = "fw_dl"
+
+          async def run():
+              async with s.SamloaderClient() as c:
+                  info = await c.get_binary_info(MODEL, REGION, FW, "AP")
+                  fname = info["filename"]
+                  print(f"Downloading {fname} ({int(info['size'])//1024//1024} MB)...", flush=True)
+                  await c.download_binary(MODEL, REGION, FW, "AP", OUTDIR,
+                                          show_progress=True, auto_rename=True)
+                  # Decrypt if needed (.enc4 / .enc2)
+                  enc = next((os.path.join(OUTDIR, f)
+                              for f in os.listdir(OUTDIR)
+                              if f.endswith((".enc4",".enc2"))), None)
+                  if enc:
+                      out = enc.rsplit(".", 1)[0]
+                      print(f"Decrypting {os.path.basename(enc)} → {os.path.basename(out)}...", flush=True)
+                      await c.decrypt_file(enc, out, MODEL, REGION, FW, "AP")
+                      os.remove(enc)
+                  print("Download complete.", flush=True)
+
+          asyncio.run(run())
+          PYEOF
+
+          ls -lh fw_dl/
+
+      # ── Step 3: Extract vendor_dlkm.img from the AP tar ───────────────────
+      - name: Extract vendor_dlkm.img
+        if: env.SKIP != '1'
+        run: |
+          AP_TAR=$(ls fw_dl/AP_*.tar.md5 fw_dl/AP_*.tar 2>/dev/null | head -1)
+          if [ -z "$AP_TAR" ]; then
+            echo "::error::No AP tar found in fw_dl/"
+            ls fw_dl/
+            exit 1
+          fi
+          echo "AP tar: $AP_TAR"
+
+          # List compressed entries
+          ENTRY=$(tar -tf "$AP_TAR" 2>/dev/null | grep vendor_dlkm | head -1)
+          if [ -z "$ENTRY" ]; then
+            echo "::error::vendor_dlkm not found inside $AP_TAR"
+            tar -tf "$AP_TAR" | head -30
+            exit 1
+          fi
+          echo "Extracting: $ENTRY"
+          tar -xf "$AP_TAR" "$ENTRY" -C fw_dl/
+
+          # Decompress .lz4 if needed
+          if echo "$ENTRY" | grep -q '\.lz4$'; then
+            lz4 -d "fw_dl/$(basename $ENTRY)" fw_dl/vendor_dlkm.img
+            rm "fw_dl/$(basename $ENTRY)"
+          else
+            mv "fw_dl/$(basename $ENTRY)" fw_dl/vendor_dlkm.img
+          fi
+
+          # The image may be a sparse Android image — unsparse it first
+          file fw_dl/vendor_dlkm.img
+          if file fw_dl/vendor_dlkm.img | grep -q 'Android sparse'; then
+            simg2img fw_dl/vendor_dlkm.img fw_dl/vendor_dlkm_raw.img
+            mv fw_dl/vendor_dlkm_raw.img fw_dl/vendor_dlkm.img
+          fi
+
+          ls -lh fw_dl/vendor_dlkm.img
+
+          # Remove the AP tar to free disk space
+          rm -f "$AP_TAR"
+
+      # ── Step 4: Mount image and extract .ko symbol offsets ────────────────
+      - name: Extract kernel module offsets
+        if: env.SKIP != '1'
+        run: |
+          mkdir -p mnt_dlkm
+          sudo mount -o loop,ro fw_dl/vendor_dlkm.img mnt_dlkm
+
+          echo "=== Kernel modules in vendor_dlkm ==="
+          find mnt_dlkm -name "*.ko" | sort | tee /tmp/all_kos.txt
+
+          # Extract offset tables for modules used by the exploit.
+          # nm prints: <hex_offset> <type> <symbol>
+          # We only care about T/t (text) and D/d (data/bss) global symbols.
+          extract_offsets() {
+            local KO="$1"
+            if [ ! -f "$KO" ]; then
+              echo "::warning::Module not found: $KO"
+              return
+            fi
+            echo "--- $(basename $KO) ---"
+            nm --defined-only "$KO" 2>/dev/null \
+              | awk '$2~/[TtDdBb]/ {printf "  %-60s 0x%s\n", $3, $1}' \
+              | sort
+          }
+
+          # These are the modules the exploit uses for offset resolution.
+          # Adjust paths to match what is in your specific vendor_dlkm build.
+          for MOD in \
+            ashmem \
+            configfs \
+            selinux \
+            samsung_q \
+            slsi_wlan \
+            exynos_chub \
+            mfc_core \
+            v4l2_mem2mem; do
+            KO_PATH=$(find mnt_dlkm -name "${MOD}.ko" | head -1)
+            extract_offsets "${KO_PATH:-missing}" >> /tmp/module_offsets.txt
+          done
+
+          cat /tmp/module_offsets.txt
+          sudo umount mnt_dlkm
+
+      # ── Step 5: Parse offsets and update target.h ─────────────────────────
+      - name: Update target.h with new offsets
+        if: env.SKIP != '1'
+        env:
+          FIRMWARE_VERSION: ${{ needs.gate.outputs.firmware_version }}
+        run: |
+          HEADER="src/targets/${TARGET}/target.h"
+
+          python3 - <<PYEOF
+          import re, os, sys
+
+          header_path = os.environ["HEADER"] if "HEADER" in os.environ else f"src/targets/{os.environ['TARGET']}/target.h"
+          fw_version  = os.environ["FIRMWARE_VERSION"]
+
+          with open(header_path) as f:
+              src = f.read()
+
+          offsets = {}
+          with open("/tmp/module_offsets.txt") as f:
+              for line in f:
+                  m = re.match(r'\s+(\S+)\s+(0x[0-9a-f]+)', line)
+                  if m:
+                      offsets[m.group(1)] = int(m.group(2), 16)
+
+          # Map of define name → nm symbol name.
+          # Add / adjust entries to match what your target.h uses.
+          SYMBOL_MAP = {
+              "ASHMEM_IOCTL_OFF":           "ashmem_ioctl",
+              "ASHMEM_COMPAT_IOCTL_OFF":    "ashmem_compat_ioctl",
+              "ASHMEM_MMAP_OFF":            "ashmem_mmap",
+              "ASHMEM_MISC_FOPS_OFF":       "ashmem_misc_fops",
+              "CONFIGFS_READ_ITER_OFF":     "configfs_read_iter",
+              "CONFIGFS_BIN_WRITE_ITER_OFF":"configfs_bin_write_iter",
+          }
+
+          def patch_define(src, name, new_val):
+              pattern = rf'(#define\s+{re.escape(name)}\s+)(0x[0-9a-fA-F]+|[0-9]+)'
+              repl    = rf'\g<1>{new_val:#x}'
+              patched, n = re.subn(pattern, repl, src)
+              if n == 0:
+                  print(f"  WARNING: #define {name} not found in target.h — skipping", file=sys.stderr)
+              return patched
+
+          changed = []
+          for define_name, sym in SYMBOL_MAP.items():
+              if sym in offsets:
+                  src = patch_define(src, define_name, offsets[sym])
+                  changed.append(f"{define_name} = {offsets[sym]:#x}")
+              else:
+                  print(f"  WARNING: symbol {sym!r} not found in module offsets", file=sys.stderr)
+
+          # Update firmware version comment / macro
+          src = re.sub(
+              r'(#define\s+FIRMWARE_VERSION\s+")[^"]+"',
+              rf'\g<1>{fw_version}"',
+              src,
+          )
+
+          with open(header_path, 'w') as f:
+              f.write(src)
+
+          print("Updated defines:")
+          for c in changed:
+              print(f"  {c}")
+          PYEOF
+
+          echo "=== Diff ==="
+          git diff "src/targets/${TARGET}/target.h" || true
+
+      # ── Step 6: Commit updated target.h ───────────────────────────────────
+      - name: Commit updated target.h
+        if: env.SKIP != '1'
+        env:
+          FW:     ${{ needs.gate.outputs.firmware_version }}
+          TARGET: ${{ needs.gate.outputs.target }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add "src/targets/${TARGET}/target.h"
+
+          if git diff --cached --quiet; then
+            echo "::notice::target.h unchanged after offset update — nothing to commit."
+          else
+            git commit -m "fix(${TARGET}): update kernel offsets for ${FW}"
+            git push origin HEAD:main
+            echo "COMMITTED=1" >> "$GITHUB_ENV"
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TRIGGER — optionally open an exploit-rebuild issue so rebuild-artifacts runs
+  # ─────────────────────────────────────────────────────────────────────────
+  trigger-rebuild:
+    needs: [gate, fetch]
+    if: |
+      always()
+      && needs.fetch.result == 'success'
+      && needs.gate.outputs.auto_trigger == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open exploit-rebuild issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET:   ${{ needs.gate.outputs.target }}
+          FW:       ${{ needs.gate.outputs.firmware_version }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "rebuild exploit for ${TARGET} (${FW})" \
+            --body "Triggered automatically by fetch-firmware-offsets workflow after committing updated offsets for \`${TARGET}\` at firmware \`${FW}\`." \
+            --label "exploit-rebuild"
+          echo "Opened exploit-rebuild issue."
