@@ -9,6 +9,7 @@
 # ┌─────────────────────────────────────────────────────────────────────────┐
 # │  Triggers                                                               │
 # │  workflow_dispatch:  manual run, one target at a time                  │
+# │  push (workflow file only): registers workflow in Actions UI            │
 # │  issues (closed):   firmware-fetch label → runs for default target     │
 # └─────────────────────────────────────────────────────────────────────────┘
 #
@@ -44,7 +45,9 @@ on:
         description: 'Open an exploit-rebuild issue after committing so rebuild-artifacts runs automatically'
         required: false
         default: 'true'
-        type: boolean
+  push:
+    paths:
+      - '.github/workflows/fetch-firmware-offsets.yml'
   issues:
     types: [closed]
 
@@ -79,18 +82,16 @@ jobs:
         run: |
           if [ "$EVENT" = "workflow_dispatch" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "push" ]; then
+            # push trigger exists only to register the workflow in the Actions UI
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Push trigger fired — skipping actual run (registration only)."
           else
             HAS=$(echo "$ISSUE_LABELS" | jq -r '[.[].name] | index("firmware-fetch") != null')
             echo "run=$HAS" >> "$GITHUB_OUTPUT"
             [ "$HAS" != "true" ] && echo "No firmware-fetch label — skipping."
           fi
 
-      # ── Write FUS client (gate copy) ─────────────────────────────────────
-      # Bugs fixed vs previous commit:
-      #   1. _post return type annotation: tuple[str,str] → tuple
-      #      (tuple[X,Y] syntax requires Python 3.9+; ubuntu-latest may run 3.8)
-      #   2. __main__ "latest" branch: _, model, region → _, _, model, region
-      #      (argv is [script, "latest", MODEL, REGION] — 4 elements, not 3)
       - name: Write FUS client library
         if: steps.decide.outputs.run == 'true'
         run: |
@@ -116,7 +117,6 @@ def _getauth(nonce):
     token = base64.b64encode(hm).decode()
     return "nonce={};signature={};nc=1;type=2;".format(nonce, urllib.parse.quote(token))
 
-# FIX 1: plain `tuple` annotation — compatible with Python 3.6–3.12
 def _post(path, body, auth=""):
     # type: (str, str, str) -> tuple
     url  = FUS_HOST + path
@@ -147,7 +147,7 @@ def get_latest_version(model, region):
     nonce = get_nonce()
     auth  = _getauth(nonce)
     body  = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<?xml version="1.0" encoding="UTF-8">'
         "<FUSMsg><FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>"
         "<FUSBody><Put>"
         "<ACCESS_MODE><Data>2</Data></ACCESS_MODE>"
@@ -270,7 +270,6 @@ if __name__ == "__main__":
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "latest":
-        # FIX 2: argv is [script, "latest", MODEL, REGION] — 4 items
         _, _, model, region = sys.argv
         print(get_latest_version(model, region))
     elif cmd == "download":
