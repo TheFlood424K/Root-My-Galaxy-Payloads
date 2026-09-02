@@ -53,11 +53,6 @@ permissions:
   issues: write
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Shared FUS client — written to /tmp/fus.py and sourced by both jobs.
-# Pure Python 3 stdlib; no pip required.
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
 # GATE — decide whether to run and resolve firmware version
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
@@ -90,132 +85,116 @@ jobs:
             [ "$HAS" != "true" ] && echo "No firmware-fetch label — skipping."
           fi
 
+      # ── Write FUS client (gate copy) ─────────────────────────────────────
+      # Bugs fixed vs previous commit:
+      #   1. _post return type annotation: tuple[str,str] → tuple
+      #      (tuple[X,Y] syntax requires Python 3.9+; ubuntu-latest may run 3.8)
+      #   2. __main__ "latest" branch: _, model, region → _, _, model, region
+      #      (argv is [script, "latest", MODEL, REGION] — 4 elements, not 3)
       - name: Write FUS client library
         if: steps.decide.outputs.run == 'true'
         run: |
           cat > /tmp/fus.py << 'PYEOF'
-# Samsung FUS client — stdlib only (Python 3.6+)
-# Implements: nonce acquisition → auth token → binary-info → chunked download
-import urllib.request, urllib.parse, hashlib, hmac, base64, time, os, re
-import xml.etree.ElementTree as ET
+import urllib.request, urllib.parse, hashlib, hmac, base64, os, re
 
-FUS_HOST  = "https://cloud-neofus.samsungmobile.com"
+FUS_HOST   = "https://cloud-neofus.samsungmobile.com"
 USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 12; SM-G991B Build/SP1A.210812.016)"
 
-# ── Key derivation (reproduced from Samsung's auth spec) ─────────────────────
 _K1 = "vicopx7dqu06em2f"
 _K2 = "waxd789d2eonk84g"
 
-def _derive(nonce: str) -> str:
+def _derive(nonce):
     key = ""
     for i in range(16):
-        c = nonce[i]
-        x = ord(c)
+        x = ord(nonce[i])
         key += _K1[x % 16] if i % 2 == 0 else _K2[x % 16]
     return key
 
-def _getauth(nonce: str) -> str:
+def _getauth(nonce):
     key   = _derive(nonce)
     hm    = hmac.new(key.encode(), nonce.encode(), hashlib.md5).digest()
     token = base64.b64encode(hm).decode()
-    return f"nonce={nonce};signature={urllib.parse.quote(token)};nc=1;type=2;"
+    return "nonce={};signature={};nc=1;type=2;".format(nonce, urllib.parse.quote(token))
 
-# ── HTTP helpers ──────────────────────────────────────────────────────────────
-def _post(path: str, body: str, auth: str = "") -> tuple[str, str]:
+# FIX 1: plain `tuple` annotation — compatible with Python 3.6–3.12
+def _post(path, body, auth=""):
+    # type: (str, str, str) -> tuple
     url  = FUS_HOST + path
-    data = body.encode()
-    req  = urllib.request.Request(url, data=data, method="POST")
-    req.add_header("Content-Type",   "application/xml")
-    req.add_header("User-Agent",     USER_AGENT)
-    req.add_header("Accept-Encoding","gzip")
+    req  = urllib.request.Request(url, data=body.encode(), method="POST")
+    req.add_header("Content-Type", "application/xml")
+    req.add_header("User-Agent",   USER_AGENT)
     if auth:
         req.add_header("Authorization", auth)
     with urllib.request.urlopen(req, timeout=30) as r:
-        new_nonce = r.getheader("NONCE", "")
-        text      = r.read().decode(errors="replace")
-    return text, new_nonce
+        nonce = r.getheader("NONCE", "")
+        text  = r.read().decode(errors="replace")
+    return text, nonce
 
-def _xml_val(text: str, tag: str) -> str:
-    m = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.S)
+def _xml(text, tag):
+    m = re.search(r"<{}>(.*?)</{}>".format(tag, tag), text, re.S)
     return m.group(1).strip() if m else ""
 
-# ── Public API ────────────────────────────────────────────────────────────────
-def get_nonce() -> str:
-    """Acquire a fresh nonce from FUS."""
+def get_nonce():
     body = '<?xml version="1.0" encoding="UTF-8"?><FUSMsg><FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr><FUSBody/></FUSMsg>'
-    _, nonce = _post("/NF_DownloadGenerateNonce.do", body)
+    resp, nonce = _post("/NF_DownloadGenerateNonce.do", body)
     if not nonce:
-        # Nonce may be embedded in response body for some regions
-        resp, _ = _post("/NF_DownloadGenerateNonce.do", body)
-        nonce = _xml_val(resp, "NONCE")
+        nonce = _xml(resp, "NONCE")
     if not nonce:
-        raise RuntimeError("Could not obtain FUS nonce")
+        raise RuntimeError("Could not obtain FUS nonce — Samsung may have changed their API")
     return nonce
 
-def get_latest_version(model: str, region: str) -> str:
-    """Return the latest firmware version string for model/region."""
+def get_latest_version(model, region):
     nonce = get_nonce()
     auth  = _getauth(nonce)
-    body  = f'''<?xml version="1.0" encoding="UTF-8"?>
-<FUSMsg>
-  <FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>
-  <FUSBody>
-    <Put>
-      <ACCESS_MODE><Data>2</Data></ACCESS_MODE>
-      <BINARY_NATURE><Data>1</Data></BINARY_NATURE>
-      <CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>
-      <DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>
-      <DEVICE_MODEL_TYPE><Data>1</Data></DEVICE_MODEL_TYPE>
-      <LOGIC_CHECK><Data></Data></LOGIC_CHECK>
-      <COUNTRY_CODE><Data>{region}</Data></COUNTRY_CODE>
-    </Put>
-  </FUSBody>
-</FUSMsg>'''
+    body  = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<FUSMsg><FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>"
+        "<FUSBody><Put>"
+        "<ACCESS_MODE><Data>2</Data></ACCESS_MODE>"
+        "<BINARY_NATURE><Data>1</Data></BINARY_NATURE>"
+        "<CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>"
+        "<DEVICE_MODEL_BLUETOOTH><Data>{}</Data></DEVICE_MODEL_BLUETOOTH>"
+        "<DEVICE_MODEL_TYPE><Data>1</Data></DEVICE_MODEL_TYPE>"
+        "<COUNTRY_CODE><Data>{}</Data></COUNTRY_CODE>"
+        "<LOGIC_CHECK><Data></Data></LOGIC_CHECK>"
+        "</Put></FUSBody></FUSMsg>"
+    ).format(model, region)
     resp, _ = _post("/NF_DownloadBinaryInform.do", body, auth)
-    version = _xml_val(resp, "LATEST_FW_VERSION")
-    if not version:
-        version = _xml_val(resp, "CURRENT_OS_VERSION")
-    return version.strip("/ \n")
+    v = _xml(resp, "LATEST_FW_VERSION") or _xml(resp, "CURRENT_OS_VERSION")
+    return v.strip("/ \n")
 
-def get_binary_info(model: str, region: str, version: str) -> dict:
-    """Return filename, path, filesize, and crc for the AP binary."""
-    nonce = get_nonce()
-    auth  = _getauth(nonce)
-    # Logic check: last 16 chars of version, XOR'd with nonce
+def get_binary_info(model, region, version):
+    nonce  = get_nonce()
+    auth   = _getauth(nonce)
     suffix = version[-16:] if len(version) >= 16 else version
-    lc = "".join(chr(ord(a) ^ ord(b)) for a, b in zip(suffix, nonce[:len(suffix)]))
-    body = f'''<?xml version="1.0" encoding="UTF-8"?>
-<FUSMsg>
-  <FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>
-  <FUSBody>
-    <Put>
-      <ACCESS_MODE><Data>2</Data></ACCESS_MODE>
-      <BINARY_NATURE><Data>1</Data></BINARY_NATURE>
-      <CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>
-      <DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>
-      <DEVICE_MODEL_TYPE><Data>1</Data></DEVICE_MODEL_TYPE>
-      <DEVICE_LOCAL_CODE><Data>{region}</Data></DEVICE_LOCAL_CODE>
-      <DEVICE_FW_VERSION><Data>{version}</Data></DEVICE_FW_VERSION>
-      <BINARY_FILE_TYPE><Data>AP</Data></BINARY_FILE_TYPE>
-      <LOGIC_CHECK><Data>{lc}</Data></LOGIC_CHECK>
-    </Put>
-  </FUSBody>
-</FUSMsg>'''
+    lc     = "".join(chr(ord(a) ^ ord(b)) for a, b in zip(suffix, nonce[:len(suffix)]))
+    body   = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<FUSMsg><FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>"
+        "<FUSBody><Put>"
+        "<ACCESS_MODE><Data>2</Data></ACCESS_MODE>"
+        "<BINARY_NATURE><Data>1</Data></BINARY_NATURE>"
+        "<CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>"
+        "<DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>"
+        "<DEVICE_MODEL_TYPE><Data>1</Data></DEVICE_MODEL_TYPE>"
+        "<DEVICE_LOCAL_CODE><Data>{region}</Data></DEVICE_LOCAL_CODE>"
+        "<DEVICE_FW_VERSION><Data>{version}</Data></DEVICE_FW_VERSION>"
+        "<BINARY_FILE_TYPE><Data>AP</Data></BINARY_FILE_TYPE>"
+        "<LOGIC_CHECK><Data>{lc}</Data></LOGIC_CHECK>"
+        "</Put></FUSBody></FUSMsg>"
+    ).format(model=model, region=region, version=version, lc=lc)
     resp, new_nonce = _post("/NF_DownloadBinaryInform.do", body, auth)
-    filename = _xml_val(resp, "BINARY_NAME")
-    filepath = _xml_val(resp, "MODEL_PATH")
-    filesize = _xml_val(resp, "BINARY_BYTE_SIZE")
-    crc32    = _xml_val(resp, "BINARY_CRC")
+    filename = _xml(resp, "BINARY_NAME")
+    filepath = _xml(resp, "MODEL_PATH")
+    filesize = _xml(resp, "BINARY_BYTE_SIZE")
     if not filename:
-        raise RuntimeError(f"BinaryInform returned no filename. Response:\n{resp[:800]}")
-    # Refresh auth with the new nonce returned by Inform
+        raise RuntimeError("BinaryInform returned no filename:\n" + resp[:600])
     new_auth = _getauth(new_nonce) if new_nonce else auth
-    return {"filename": filename, "path": filepath, "size": int(filesize or 0),
-            "crc32": crc32, "auth": new_auth}
+    return {"filename": filename, "path": filepath,
+            "size": int(filesize or 0), "auth": new_auth}
 
-def download_ap(model: str, region: str, version: str, outdir: str) -> str:
-    """Download and decrypt the AP tar. Returns path to the decrypted tar."""
-    info = get_binary_info(model, region, version)
+def download_ap(model, region, version, outdir):
+    info     = get_binary_info(model, region, version)
     fname    = info["filename"]
     fpath    = info["path"]
     filesize = info["size"]
@@ -224,40 +203,34 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
     enc_path = os.path.join(outdir, fname)
     out_path = enc_path.rsplit(".", 1)[0] if fname.endswith((".enc4", ".enc2")) else enc_path
 
-    print(f"Downloading {fname}  ({filesize//1024//1024} MB)...", flush=True)
+    print("Downloading {}  ({} MB)...".format(fname, filesize // 1024 // 1024), flush=True)
 
-    # Init download session
-    body = f'''<?xml version="1.0" encoding="UTF-8"?>
-<FUSMsg>
-  <FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>
-  <FUSBody>
-    <Put>
-      <ACCESS_MODE><Data>2</Data></ACCESS_MODE>
-      <BINARY_FILE_TYPE><Data>AP</Data></BINARY_FILE_TYPE>
-      <BINARY_NATURE><Data>1</Data></BINARY_NATURE>
-      <CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>
-      <DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>
-      <DEVICE_LOCAL_CODE><Data>{region}</Data></DEVICE_LOCAL_CODE>
-      <DEVICE_FW_VERSION><Data>{version}</Data></DEVICE_FW_VERSION>
-      <FILENAME><Data>{fname}</Data></FILENAME>
-      <LOGIC_CHECK><Data></Data></LOGIC_CHECK>
-      <MODEL_PATH><Data>{fpath}</Data></LOGIC_CHECK>
-    </Put>
-  </FUSBody>
-</FUSMsg>'''
-    _post("/NF_DownloadBinaryInitForMass.do", body, auth)
+    init_body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<FUSMsg><FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>"
+        "<FUSBody><Put>"
+        "<ACCESS_MODE><Data>2</Data></ACCESS_MODE>"
+        "<BINARY_FILE_TYPE><Data>AP</Data></BINARY_FILE_TYPE>"
+        "<BINARY_NATURE><Data>1</Data></BINARY_NATURE>"
+        "<CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>"
+        "<DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>"
+        "<DEVICE_LOCAL_CODE><Data>{region}</Data></DEVICE_LOCAL_CODE>"
+        "<DEVICE_FW_VERSION><Data>{version}</Data></DEVICE_FW_VERSION>"
+        "<FILENAME><Data>{fname}</Data></FILENAME>"
+        "<MODEL_PATH><Data>{fpath}</Data></MODEL_PATH>"
+        "<LOGIC_CHECK><Data></Data></LOGIC_CHECK>"
+        "</Put></FUSBody></FUSMsg>"
+    ).format(model=model, region=region, version=version, fname=fname, fpath=fpath)
+    _post("/NF_DownloadBinaryInitForMass.do", init_body, auth)
 
-    # Stream download
-    dl_url = FUS_HOST + "/NF_DownloadBinaryForMass.do?" + urllib.parse.urlencode({
-        "file": fpath + fname
-    })
+    dl_url = FUS_HOST + "/NF_DownloadBinaryForMass.do?" + urllib.parse.urlencode({"file": fpath + fname})
     req = urllib.request.Request(dl_url)
     req.add_header("Authorization", auth)
     req.add_header("User-Agent", USER_AGENT)
-    chunk = 1 << 20  # 1 MB
+    chunk = 1 << 20
     downloaded = 0
-    last_pct = -1
-    with urllib.request.urlopen(req, timeout=300) as r, open(enc_path, "wb") as f:
+    last_pct   = -1
+    with urllib.request.urlopen(req, timeout=600) as r, open(enc_path, "wb") as f:
         while True:
             buf = r.read(chunk)
             if not buf:
@@ -266,61 +239,46 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
             downloaded += len(buf)
             if filesize:
                 pct = downloaded * 100 // filesize
-                if pct != last_pct and pct % 5 == 0:
-                    print(f"  {pct}% ({downloaded//1024//1024}/{filesize//1024//1024} MB)", flush=True)
+                if pct != last_pct and pct % 10 == 0:
+                    print("  {}%  ({}/{} MB)".format(pct, downloaded // 1024 // 1024, filesize // 1024 // 1024), flush=True)
                     last_pct = pct
-    print(f"Download complete: {enc_path}", flush=True)
+    print("Download complete: " + enc_path, flush=True)
 
-    # Decrypt if needed
     if fname.endswith(".enc4"):
-        _decrypt_enc4(enc_path, out_path, version)
+        from Crypto.Cipher import AES
+        key = hashlib.md5(version[-16:].encode()).digest() + hashlib.md5(version[:16].encode()).digest()
+        iv  = key[:16]
+        with open(enc_path, "rb") as f:
+            data = f.read()
+        with open(out_path, "wb") as f:
+            f.write(AES.new(key, AES.MODE_CBC, iv).decrypt(data))
         os.remove(enc_path)
+        print("Decrypted enc4 -> " + out_path, flush=True)
     elif fname.endswith(".enc2"):
-        _decrypt_enc2(enc_path, out_path)
+        from Crypto.Cipher import AES
+        KEY = bytes(range(32))
+        with open(enc_path, "rb") as f:
+            data = f.read()
+        with open(out_path, "wb") as f:
+            f.write(AES.new(KEY, AES.MODE_ECB).decrypt(data))
         os.remove(enc_path)
+        print("Decrypted enc2 -> " + out_path, flush=True)
 
     return out_path
-
-# ── Decryption helpers ────────────────────────────────────────────────────────
-def _decrypt_enc4(src: str, dst: str, version: str):
-    """AES-CBC decrypt .enc4 using key derived from firmware version."""
-    from Crypto.Cipher import AES  # pycryptodome — installed separately
-    key = hashlib.md5(version[-16:].encode()).digest() + \
-          hashlib.md5(version[:16].encode()).digest()
-    iv  = key[:16]
-    with open(src, "rb") as f:
-        data = f.read()
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    with open(dst, "wb") as f:
-        f.write(cipher.decrypt(data))
-    print(f"Decrypted enc4 → {dst}", flush=True)
-
-def _decrypt_enc2(src: str, dst: str):
-    """AES-ECB decrypt .enc2 using the fixed Samsung key."""
-    from Crypto.Cipher import AES
-    KEY = bytes([0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
-                 0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
-                 0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,
-                 0x18,0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f])
-    with open(src, "rb") as f:
-        data = f.read()
-    cipher = AES.new(KEY, AES.MODE_ECB)
-    with open(dst, "wb") as f:
-        f.write(cipher.decrypt(data))
-    print(f"Decrypted enc2 → {dst}", flush=True)
 
 if __name__ == "__main__":
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "latest":
-        _, model, region = sys.argv
+        # FIX 2: argv is [script, "latest", MODEL, REGION] — 4 items
+        _, _, model, region = sys.argv
         print(get_latest_version(model, region))
     elif cmd == "download":
         _, _, model, region, version, outdir = sys.argv
         download_ap(model, region, version, outdir)
     else:
-        print("Usage: fus.py latest MODEL REGION")
-        print("       fus.py download MODEL REGION VERSION OUTDIR")
+        print("Usage: python3 fus.py latest MODEL REGION")
+        print("       python3 fus.py download MODEL REGION VERSION OUTDIR")
         sys.exit(1)
 PYEOF
           echo "FUS client written to /tmp/fus.py"
@@ -350,7 +308,6 @@ PYEOF
             TRIGGER="${INPUT_TRIGGER:-true}"
           fi
 
-          # If no explicit firmware version, query FUS directly
           if [ -z "$FW" ]; then
             echo "No firmware version supplied — querying FUS for $MODEL/$REGION..."
             FW=$(python3 /tmp/fus.py latest "$MODEL" "$REGION" 2>&1 | tail -1 || echo "")
@@ -394,115 +351,109 @@ PYEOF
             android-sdk-libsparse-utils \
             python3-pip \
             jq
-          # pycryptodome is needed only for .enc4/.enc2 decryption
-          # pip is available; fall back gracefully if enc files not present
           pip install --quiet pycryptodome || true
 
       - name: Write FUS client library
         run: |
           cat > /tmp/fus.py << 'PYEOF'
-# Samsung FUS client — stdlib only (Python 3.6+)
-# Implements: nonce acquisition → auth token → binary-info → chunked download
-import urllib.request, urllib.parse, hashlib, hmac, base64, time, os, re
-import xml.etree.ElementTree as ET
+import urllib.request, urllib.parse, hashlib, hmac, base64, os, re
 
-FUS_HOST  = "https://cloud-neofus.samsungmobile.com"
+FUS_HOST   = "https://cloud-neofus.samsungmobile.com"
 USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 12; SM-G991B Build/SP1A.210812.016)"
 
 _K1 = "vicopx7dqu06em2f"
 _K2 = "waxd789d2eonk84g"
 
-def _derive(nonce: str) -> str:
+def _derive(nonce):
     key = ""
     for i in range(16):
-        c = nonce[i]
-        x = ord(c)
+        x = ord(nonce[i])
         key += _K1[x % 16] if i % 2 == 0 else _K2[x % 16]
     return key
 
-def _getauth(nonce: str) -> str:
+def _getauth(nonce):
     key   = _derive(nonce)
     hm    = hmac.new(key.encode(), nonce.encode(), hashlib.md5).digest()
     token = base64.b64encode(hm).decode()
-    return f"nonce={nonce};signature={urllib.parse.quote(token)};nc=1;type=2;"
+    return "nonce={};signature={};nc=1;type=2;".format(nonce, urllib.parse.quote(token))
 
-def _post(path: str, body: str, auth: str = "") -> tuple:
+def _post(path, body, auth=""):
+    # type: (str, str, str) -> tuple
     url  = FUS_HOST + path
-    data = body.encode()
-    req  = urllib.request.Request(url, data=data, method="POST")
-    req.add_header("Content-Type",   "application/xml")
-    req.add_header("User-Agent",     USER_AGENT)
+    req  = urllib.request.Request(url, data=body.encode(), method="POST")
+    req.add_header("Content-Type", "application/xml")
+    req.add_header("User-Agent",   USER_AGENT)
     if auth:
         req.add_header("Authorization", auth)
     with urllib.request.urlopen(req, timeout=30) as r:
-        new_nonce = r.getheader("NONCE", "")
-        text      = r.read().decode(errors="replace")
-    return text, new_nonce
+        nonce = r.getheader("NONCE", "")
+        text  = r.read().decode(errors="replace")
+    return text, nonce
 
-def _xml_val(text: str, tag: str) -> str:
-    m = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.S)
+def _xml(text, tag):
+    m = re.search(r"<{}>(.*?)</{}>".format(tag, tag), text, re.S)
     return m.group(1).strip() if m else ""
 
-def get_nonce() -> str:
+def get_nonce():
     body = '<?xml version="1.0" encoding="UTF-8"?><FUSMsg><FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr><FUSBody/></FUSMsg>'
     resp, nonce = _post("/NF_DownloadGenerateNonce.do", body)
     if not nonce:
-        nonce = _xml_val(resp, "NONCE")
+        nonce = _xml(resp, "NONCE")
     if not nonce:
         raise RuntimeError("Could not obtain FUS nonce — Samsung may have changed their API")
     return nonce
 
-def get_latest_version(model: str, region: str) -> str:
+def get_latest_version(model, region):
     nonce = get_nonce()
     auth  = _getauth(nonce)
-    body  = f'''<?xml version="1.0" encoding="UTF-8"?>
-<FUSMsg>
-  <FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>
-  <FUSBody><Put>
-    <ACCESS_MODE><Data>2</Data></ACCESS_MODE>
-    <BINARY_NATURE><Data>1</Data></BINARY_NATURE>
-    <CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>
-    <DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>
-    <DEVICE_MODEL_TYPE><Data>1</Data></DEVICE_MODEL_TYPE>
-    <COUNTRY_CODE><Data>{region}</Data></COUNTRY_CODE>
-    <LOGIC_CHECK><Data></Data></LOGIC_CHECK>
-  </Put></FUSBody>
-</FUSMsg>'''
+    body  = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<FUSMsg><FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>"
+        "<FUSBody><Put>"
+        "<ACCESS_MODE><Data>2</Data></ACCESS_MODE>"
+        "<BINARY_NATURE><Data>1</Data></BINARY_NATURE>"
+        "<CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>"
+        "<DEVICE_MODEL_BLUETOOTH><Data>{}</Data></DEVICE_MODEL_BLUETOOTH>"
+        "<DEVICE_MODEL_TYPE><Data>1</Data></DEVICE_MODEL_TYPE>"
+        "<COUNTRY_CODE><Data>{}</Data></COUNTRY_CODE>"
+        "<LOGIC_CHECK><Data></Data></LOGIC_CHECK>"
+        "</Put></FUSBody></FUSMsg>"
+    ).format(model, region)
     resp, _ = _post("/NF_DownloadBinaryInform.do", body, auth)
-    v = _xml_val(resp, "LATEST_FW_VERSION") or _xml_val(resp, "CURRENT_OS_VERSION")
+    v = _xml(resp, "LATEST_FW_VERSION") or _xml(resp, "CURRENT_OS_VERSION")
     return v.strip("/ \n")
 
-def get_binary_info(model: str, region: str, version: str) -> dict:
-    nonce = get_nonce()
-    auth  = _getauth(nonce)
+def get_binary_info(model, region, version):
+    nonce  = get_nonce()
+    auth   = _getauth(nonce)
     suffix = version[-16:] if len(version) >= 16 else version
-    lc = "".join(chr(ord(a) ^ ord(b)) for a, b in zip(suffix, nonce[:len(suffix)]))
-    body = f'''<?xml version="1.0" encoding="UTF-8"?>
-<FUSMsg>
-  <FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>
-  <FUSBody><Put>
-    <ACCESS_MODE><Data>2</Data></ACCESS_MODE>
-    <BINARY_NATURE><Data>1</Data></BINARY_NATURE>
-    <CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>
-    <DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>
-    <DEVICE_MODEL_TYPE><Data>1</Data></DEVICE_MODEL_TYPE>
-    <DEVICE_LOCAL_CODE><Data>{region}</Data></DEVICE_LOCAL_CODE>
-    <DEVICE_FW_VERSION><Data>{version}</Data></DEVICE_FW_VERSION>
-    <BINARY_FILE_TYPE><Data>AP</Data></BINARY_FILE_TYPE>
-    <LOGIC_CHECK><Data>{lc}</Data></LOGIC_CHECK>
-  </Put></FUSBody>
-</FUSMsg>'''
+    lc     = "".join(chr(ord(a) ^ ord(b)) for a, b in zip(suffix, nonce[:len(suffix)]))
+    body   = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<FUSMsg><FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>"
+        "<FUSBody><Put>"
+        "<ACCESS_MODE><Data>2</Data></ACCESS_MODE>"
+        "<BINARY_NATURE><Data>1</Data></BINARY_NATURE>"
+        "<CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>"
+        "<DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>"
+        "<DEVICE_MODEL_TYPE><Data>1</Data></DEVICE_MODEL_TYPE>"
+        "<DEVICE_LOCAL_CODE><Data>{region}</Data></DEVICE_LOCAL_CODE>"
+        "<DEVICE_FW_VERSION><Data>{version}</Data></DEVICE_FW_VERSION>"
+        "<BINARY_FILE_TYPE><Data>AP</Data></BINARY_FILE_TYPE>"
+        "<LOGIC_CHECK><Data>{lc}</Data></LOGIC_CHECK>"
+        "</Put></FUSBody></FUSMsg>"
+    ).format(model=model, region=region, version=version, lc=lc)
     resp, new_nonce = _post("/NF_DownloadBinaryInform.do", body, auth)
-    filename = _xml_val(resp, "BINARY_NAME")
-    filepath = _xml_val(resp, "MODEL_PATH")
-    filesize = _xml_val(resp, "BINARY_BYTE_SIZE")
+    filename = _xml(resp, "BINARY_NAME")
+    filepath = _xml(resp, "MODEL_PATH")
+    filesize = _xml(resp, "BINARY_BYTE_SIZE")
     if not filename:
-        raise RuntimeError(f"BinaryInform returned no filename:\n{resp[:600]}")
+        raise RuntimeError("BinaryInform returned no filename:\n" + resp[:600])
     new_auth = _getauth(new_nonce) if new_nonce else auth
     return {"filename": filename, "path": filepath,
             "size": int(filesize or 0), "auth": new_auth}
 
-def download_ap(model: str, region: str, version: str, outdir: str) -> str:
+def download_ap(model, region, version, outdir):
     info     = get_binary_info(model, region, version)
     fname    = info["filename"]
     fpath    = info["path"]
@@ -512,61 +463,66 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
     enc_path = os.path.join(outdir, fname)
     out_path = enc_path.rsplit(".", 1)[0] if fname.endswith((".enc4", ".enc2")) else enc_path
 
-    print(f"Downloading {fname}  ({filesize//1024//1024} MB)...", flush=True)
+    print("Downloading {}  ({} MB)...".format(fname, filesize // 1024 // 1024), flush=True)
 
-    body = f'''<?xml version="1.0" encoding="UTF-8"?>
-<FUSMsg>
-  <FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>
-  <FUSBody><Put>
-    <ACCESS_MODE><Data>2</Data></ACCESS_MODE>
-    <BINARY_FILE_TYPE><Data>AP</Data></BINARY_FILE_TYPE>
-    <BINARY_NATURE><Data>1</Data></BINARY_NATURE>
-    <CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>
-    <DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>
-    <DEVICE_LOCAL_CODE><Data>{region}</Data></DEVICE_LOCAL_CODE>
-    <DEVICE_FW_VERSION><Data>{version}</Data></DEVICE_FW_VERSION>
-    <FILENAME><Data>{fname}</Data></FILENAME>
-    <MODEL_PATH><Data>{fpath}</Data></MODEL_PATH>
-    <LOGIC_CHECK><Data></Data></LOGIC_CHECK>
-  </Put></FUSBody>
-</FUSMsg>'''
-    _post("/NF_DownloadBinaryInitForMass.do", body, auth)
+    init_body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<FUSMsg><FUSHdr><ProDType>Smart Switch</ProDType></FUSHdr>"
+        "<FUSBody><Put>"
+        "<ACCESS_MODE><Data>2</Data></ACCESS_MODE>"
+        "<BINARY_FILE_TYPE><Data>AP</Data></BINARY_FILE_TYPE>"
+        "<BINARY_NATURE><Data>1</Data></BINARY_NATURE>"
+        "<CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>"
+        "<DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>"
+        "<DEVICE_LOCAL_CODE><Data>{region}</Data></DEVICE_LOCAL_CODE>"
+        "<DEVICE_FW_VERSION><Data>{version}</Data></DEVICE_FW_VERSION>"
+        "<FILENAME><Data>{fname}</Data></FILENAME>"
+        "<MODEL_PATH><Data>{fpath}</Data></MODEL_PATH>"
+        "<LOGIC_CHECK><Data></Data></LOGIC_CHECK>"
+        "</Put></FUSBody></FUSMsg>"
+    ).format(model=model, region=region, version=version, fname=fname, fpath=fpath)
+    _post("/NF_DownloadBinaryInitForMass.do", init_body, auth)
 
     dl_url = FUS_HOST + "/NF_DownloadBinaryForMass.do?" + urllib.parse.urlencode({"file": fpath + fname})
     req = urllib.request.Request(dl_url)
     req.add_header("Authorization", auth)
     req.add_header("User-Agent", USER_AGENT)
     chunk = 1 << 20
-    downloaded = 0; last_pct = -1
+    downloaded = 0
+    last_pct   = -1
     with urllib.request.urlopen(req, timeout=600) as r, open(enc_path, "wb") as f:
         while True:
             buf = r.read(chunk)
-            if not buf: break
+            if not buf:
+                break
             f.write(buf)
             downloaded += len(buf)
             if filesize:
                 pct = downloaded * 100 // filesize
                 if pct != last_pct and pct % 10 == 0:
-                    print(f"  {pct}%  ({downloaded//1024//1024}/{filesize//1024//1024} MB)", flush=True)
+                    print("  {}%  ({}/{} MB)".format(pct, downloaded // 1024 // 1024, filesize // 1024 // 1024), flush=True)
                     last_pct = pct
-    print(f"Download complete: {enc_path}", flush=True)
+    print("Download complete: " + enc_path, flush=True)
 
     if fname.endswith(".enc4"):
         from Crypto.Cipher import AES
         key = hashlib.md5(version[-16:].encode()).digest() + hashlib.md5(version[:16].encode()).digest()
         iv  = key[:16]
-        with open(enc_path, "rb") as f: data = f.read()
-        cipher = AES.new(key, AES.MODE_CBC, iv)
-        with open(out_path, "wb") as f: f.write(cipher.decrypt(data))
+        with open(enc_path, "rb") as f:
+            data = f.read()
+        with open(out_path, "wb") as f:
+            f.write(AES.new(key, AES.MODE_CBC, iv).decrypt(data))
         os.remove(enc_path)
-        print(f"Decrypted enc4 → {out_path}", flush=True)
+        print("Decrypted enc4 -> " + out_path, flush=True)
     elif fname.endswith(".enc2"):
         from Crypto.Cipher import AES
         KEY = bytes(range(32))
-        with open(enc_path, "rb") as f: data = f.read()
-        with open(out_path, "wb") as f: f.write(AES.new(KEY, AES.MODE_ECB).decrypt(data))
+        with open(enc_path, "rb") as f:
+            data = f.read()
+        with open(out_path, "wb") as f:
+            f.write(AES.new(KEY, AES.MODE_ECB).decrypt(data))
         os.remove(enc_path)
-        print(f"Decrypted enc2 → {out_path}", flush=True)
+        print("Decrypted enc2 -> " + out_path, flush=True)
 
     return out_path
 
@@ -605,7 +561,7 @@ PYEOF
             echo "SKIP=0" >> "$GITHUB_ENV"
           fi
 
-      # ── Step 2: Download AP firmware via FUS ──────────────────────────────
+      # ── Step 2: Download AP firmware via FUS ─────────────────────────────
       - name: Download AP firmware (FUS)
         if: env.SKIP != '1'
         run: |
@@ -614,7 +570,7 @@ PYEOF
           echo "=== Downloaded files ==="
           ls -lh fw_dl/
 
-      # ── Step 3: Extract vendor_dlkm.img from the AP tar ───────────────────
+      # ── Step 3: Extract vendor_dlkm.img from the AP tar ──────────────────
       - name: Extract vendor_dlkm.img
         if: env.SKIP != '1'
         run: |
@@ -697,58 +653,59 @@ PYEOF
           python3 - <<'PYEOF'
           import re, os, sys
 
-          header_path  = f"src/targets/{os.environ['TARGET']}/target.h"
-          fw_version   = os.environ['FIRMWARE_VERSION']
+          header_path  = "src/targets/{}/target.h".format(os.environ["TARGET"])
+          fw_version   = os.environ["FIRMWARE_VERSION"]
 
           with open(header_path) as f:
               src = f.read()
 
           offsets = {}
-          with open('/tmp/module_offsets.txt') as f:
+          with open("/tmp/module_offsets.txt") as f:
               for line in f:
-                  m = re.match(r'\s+(\S+)\s+(0x[0-9a-f]+)', line)
+                  m = re.match(r"\s+(\S+)\s+(0x[0-9a-f]+)", line)
                   if m:
                       offsets[m.group(1)] = int(m.group(2), 16)
 
           SYMBOL_MAP = {
-              'ASHMEM_IOCTL_OFF':            'ashmem_ioctl',
-              'ASHMEM_COMPAT_IOCTL_OFF':     'ashmem_compat_ioctl',
-              'ASHMEM_MMAP_OFF':             'ashmem_mmap',
-              'ASHMEM_MISC_FOPS_OFF':        'ashmem_misc_fops',
-              'CONFIGFS_READ_ITER_OFF':      'configfs_read_iter',
-              'CONFIGFS_BIN_WRITE_ITER_OFF': 'configfs_bin_write_iter',
+              "ASHMEM_IOCTL_OFF":            "ashmem_ioctl",
+              "ASHMEM_COMPAT_IOCTL_OFF":     "ashmem_compat_ioctl",
+              "ASHMEM_MMAP_OFF":             "ashmem_mmap",
+              "ASHMEM_MISC_FOPS_OFF":        "ashmem_misc_fops",
+              "CONFIGFS_READ_ITER_OFF":      "configfs_read_iter",
+              "CONFIGFS_BIN_WRITE_ITER_OFF": "configfs_bin_write_iter",
           }
 
           def patch_define(src, name, val):
-              pat  = rf'(#define\s+{re.escape(name)}\s+)(0x[0-9a-fA-F]+|[0-9]+)'
-              repl = rf'\g<1>{val:#x}'
+              pat  = r"(#define\s+{}\s+)(0x[0-9a-fA-F]+|[0-9]+)".format(re.escape(name))
+              repl = r"\g<1>{:#x}".format(val)
               out, n = re.subn(pat, repl, src)
               if n == 0:
-                  print(f'  WARNING: #define {name} not found — skipping', file=sys.stderr)
+                  print("  WARNING: #define {} not found — skipping".format(name), file=sys.stderr)
               return out
 
           changed = []
           for define, sym in SYMBOL_MAP.items():
               if sym in offsets:
                   src = patch_define(src, define, offsets[sym])
-                  changed.append(f'{define} = {offsets[sym]:#x}')
+                  changed.append("{} = {:#x}".format(define, offsets[sym]))
               else:
-                  print(f'  WARNING: symbol {sym!r} not in module offsets', file=sys.stderr)
+                  print("  WARNING: symbol {!r} not in module offsets".format(sym), file=sys.stderr)
 
           src = re.sub(
               r'(#define\s+FIRMWARE_VERSION\s+")[^"]+"',
-              rf'\g<1>{fw_version}"',
+              r'\g<1>' + fw_version + '"',
               src,
           )
 
-          with open(header_path, 'w') as f:
+          with open(header_path, "w") as f:
               f.write(src)
 
           if changed:
-              print('Updated defines:')
-              for c in changed: print(f'  {c}')
+              print("Updated defines:")
+              for c in changed:
+                  print("  " + c)
           else:
-              print('No defines updated.')
+              print("No defines updated.")
           PYEOF
 
           echo "=== Diff ==="
