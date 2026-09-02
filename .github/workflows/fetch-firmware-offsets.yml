@@ -22,7 +22,7 @@ on:
         required: false
         default: 'SM-S936U1'
       region:
-        description: 'Region / CSC (e.g. XAA, UCH)'
+        description: 'Region / CSC (e.g. XAA, TMB)'
         required: false
         default: 'XAA'
       firmware_version:
@@ -82,12 +82,10 @@ jobs:
             [ "$HAS" != "true" ] && echo "No firmware-fetch label — skipping."
           fi
 
-      # Install from GitHub source — PyPI is unreachable on this runner
+      # Install from GitHub source — PyPI unreachable on this runner
       - name: Install samloader
         if: steps.decide.outputs.run == 'true'
-        run: |
-          pip install --quiet \
-            "git+https://github.com/nlscc/samloader.git"
+        run: pip install --quiet "git+https://github.com/nlscc/samloader.git"
 
       - name: Resolve parameters
         id: resolve
@@ -115,6 +113,7 @@ jobs:
           fi
 
           # If no explicit firmware version, query Samsung FUS via samloader CLI
+          # nlscc/samloader: samloader -m MODEL -r REGION checkupdate
           if [ -z "$FW" ]; then
             echo "No firmware version supplied — querying Samsung FUS for $MODEL/$REGION..."
             FW=$(samloader -m "$MODEL" -r "$REGION" checkupdate 2>/dev/null \
@@ -160,11 +159,9 @@ jobs:
             python3-pip \
             jq
 
-      # Install from GitHub source — PyPI is unreachable on this runner
+      # Install from GitHub source — PyPI unreachable on this runner
       - name: Install samloader
-        run: |
-          pip install --quiet \
-            "git+https://github.com/nlscc/samloader.git"
+        run: pip install --quiet "git+https://github.com/nlscc/samloader.git"
 
       # ── Step 1: Check whether target.h already matches this firmware ──────
       - name: Check firmware version vs current target.h
@@ -185,8 +182,15 @@ jobs:
             echo "SKIP=0" >> "$GITHUB_ENV"
           fi
 
-      # ── Step 2: Download AP partition only ────────────────────────────────
-      - name: Download AP firmware
+      # ── Step 2: Download firmware (all partitions; filter to AP below) ────
+      #
+      # nlscc/samloader CLI reference (as installed from GitHub source):
+      #   samloader -m MODEL -r REGION download --fw-ver VERSION -O OUTDIR
+      #
+      # There is no -t / --type flag in this version — it downloads all
+      # partitions (AP, BL, CP, CSC).  We remove the non-AP tars immediately
+      # after to reclaim disk space before the ~10 GB AP extraction.
+      - name: Download firmware (samloader)
         if: env.SKIP != '1'
         run: |
           mkdir -p fw_dl
@@ -194,9 +198,15 @@ jobs:
             -m "$MODEL" \
             -r "$REGION" \
             download \
-            -v "$FW" \
-            -t AP \
-            -o fw_dl
+            --fw-ver "$FW" \
+            -O fw_dl
+          echo "=== Downloaded files ==="
+          ls -lh fw_dl/
+          # Remove non-AP partitions (BL_, CP_, CSC_, HOME_CSC_) immediately
+          # to free disk space before lz4 decompression of the AP tar.
+          find fw_dl/ -maxdepth 1 -name '*.tar.md5' ! -name 'AP_*' -delete
+          find fw_dl/ -maxdepth 1 -name '*.tar'     ! -name 'AP_*' -delete
+          echo "=== After removing non-AP tars ==="
           ls -lh fw_dl/
 
       # ── Step 3: Extract vendor_dlkm.img from the AP tar ───────────────────
@@ -237,7 +247,7 @@ jobs:
           ls -lh fw_dl/vendor_dlkm.img
           rm -f "$AP_TAR"
 
-      # ── Step 4: Mount image and dump symbol offsets ────────────────────────
+      # ── Step 4: Mount image and dump symbol offsets ───────────────────────
       - name: Extract kernel module offsets
         if: env.SKIP != '1'
         run: |
@@ -273,7 +283,7 @@ jobs:
           cat /tmp/module_offsets.txt
           sudo umount mnt_dlkm
 
-      # ── Step 5: Patch target.h ─────────────────────────────────────────────
+      # ── Step 5: Patch target.h ────────────────────────────────────────────
       - name: Update target.h with new offsets
         if: env.SKIP != '1'
         env:
@@ -339,7 +349,7 @@ jobs:
           echo "=== Diff ==="
           git diff "src/targets/${TARGET}/target.h" || true
 
-      # ── Step 6: Commit ─────────────────────────────────────────────────────
+      # ── Step 6: Commit ────────────────────────────────────────────────────
       - name: Commit updated target.h
         if: env.SKIP != '1'
         env:
