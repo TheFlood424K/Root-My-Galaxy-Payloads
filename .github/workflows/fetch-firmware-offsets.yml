@@ -1,7 +1,7 @@
-# Fetches the Samsung AP firmware for a target using samloader3 (Python port of
-# SamFirm_Reborn), extracts the vendor_dlkm image, mounts it, reads symbol
-# offsets from the relevant .ko files, and commits the updated target.h back to
-# main so the rebuild-artifacts workflow can consume it.
+# Fetches the Samsung AP firmware for a target using samloader (nlscc/samloader),
+# extracts the vendor_dlkm image, mounts it, reads symbol offsets from the
+# relevant .ko files, and commits the updated target.h back to main so the
+# rebuild-artifacts workflow can consume it.
 #
 # ┌─────────────────────────────────────────────────────────────────────────┐
 # │  Triggers                                                               │
@@ -82,9 +82,12 @@ jobs:
             [ "$HAS" != "true" ] && echo "No firmware-fetch label — skipping."
           fi
 
-      - name: Install samloader3
+      # Install from GitHub source — PyPI is unreachable on this runner
+      - name: Install samloader
         if: steps.decide.outputs.run == 'true'
-        run: pip install --quiet samloader3
+        run: |
+          pip install --quiet \
+            "git+https://github.com/nlscc/samloader.git"
 
       - name: Resolve parameters
         id: resolve
@@ -111,7 +114,7 @@ jobs:
             TRIGGER="${INPUT_TRIGGER:-true}"
           fi
 
-          # If no explicit firmware version, use samloader3 CLI to check latest
+          # If no explicit firmware version, query Samsung FUS via samloader CLI
           if [ -z "$FW" ]; then
             echo "No firmware version supplied — querying Samsung FUS for $MODEL/$REGION..."
             FW=$(samloader -m "$MODEL" -r "$REGION" checkupdate 2>/dev/null \
@@ -157,10 +160,13 @@ jobs:
             python3-pip \
             jq
 
-      - name: Install samloader3
-        run: pip install --quiet samloader3
+      # Install from GitHub source — PyPI is unreachable on this runner
+      - name: Install samloader
+        run: |
+          pip install --quiet \
+            "git+https://github.com/nlscc/samloader.git"
 
-      # ── Step 1: Check whether target.h already matches this firmware ────────
+      # ── Step 1: Check whether target.h already matches this firmware ──────
       - name: Check firmware version vs current target.h
         id: check
         run: |
@@ -180,13 +186,10 @@ jobs:
           fi
 
       # ── Step 2: Download AP partition only ────────────────────────────────
-      - name: Download AP firmware (samloader3)
+      - name: Download AP firmware
         if: env.SKIP != '1'
         run: |
           mkdir -p fw_dl
-          # samloader3 CLI usage:
-          #   samloader -m <model> -r <region> download -v <fw> -t AP -o <dir>
-          # --no-decrypt is NOT used: we want the decrypted tar output.
           samloader \
             -m "$MODEL" \
             -r "$REGION" \
@@ -217,7 +220,6 @@ jobs:
           echo "Extracting: $ENTRY"
           tar -xf "$AP_TAR" "$ENTRY" -C fw_dl/
 
-          # Decompress .lz4 if present
           BASENAME=$(basename "$ENTRY")
           if echo "$BASENAME" | grep -q '\.lz4$'; then
             lz4 -d "fw_dl/$BASENAME" fw_dl/vendor_dlkm.img
@@ -226,7 +228,6 @@ jobs:
             mv "fw_dl/$BASENAME" fw_dl/vendor_dlkm.img
           fi
 
-          # Un-sparse if Android sparse image
           file fw_dl/vendor_dlkm.img
           if file fw_dl/vendor_dlkm.img | grep -qi 'android sparse'; then
             simg2img fw_dl/vendor_dlkm.img fw_dl/vendor_dlkm_raw.img
@@ -236,7 +237,7 @@ jobs:
           ls -lh fw_dl/vendor_dlkm.img
           rm -f "$AP_TAR"
 
-      # ── Step 4: Mount image and dump symbol offsets from .ko files ──────────
+      # ── Step 4: Mount image and dump symbol offsets ────────────────────────
       - name: Extract kernel module offsets
         if: env.SKIP != '1'
         run: |
@@ -255,7 +256,6 @@ jobs:
               | sort
           }
 
-          # Modules the exploit references — extend as needed
           for MOD in \
             ashmem \
             configfs \
@@ -273,7 +273,7 @@ jobs:
           cat /tmp/module_offsets.txt
           sudo umount mnt_dlkm
 
-      # ── Step 5: Patch target.h with new offsets and firmware version ────────
+      # ── Step 5: Patch target.h ─────────────────────────────────────────────
       - name: Update target.h with new offsets
         if: env.SKIP != '1'
         env:
@@ -295,7 +295,6 @@ jobs:
                   if m:
                       offsets[m.group(1)] = int(m.group(2), 16)
 
-          # define-name → nm symbol.  Adjust to match your target.h macros.
           SYMBOL_MAP = {
               'ASHMEM_IOCTL_OFF':            'ashmem_ioctl',
               'ASHMEM_COMPAT_IOCTL_OFF':     'ashmem_compat_ioctl',
@@ -321,7 +320,6 @@ jobs:
               else:
                   print(f'  WARNING: symbol {sym!r} not in module offsets', file=sys.stderr)
 
-          # Bump FIRMWARE_VERSION string
           src = re.sub(
               r'(#define\s+FIRMWARE_VERSION\s+")[^"]+"',
               rf'\g<1>{fw_version}"',
@@ -341,7 +339,7 @@ jobs:
           echo "=== Diff ==="
           git diff "src/targets/${TARGET}/target.h" || true
 
-      # ── Step 6: Commit updated target.h ───────────────────────────────────
+      # ── Step 6: Commit ─────────────────────────────────────────────────────
       - name: Commit updated target.h
         if: env.SKIP != '1'
         env:
