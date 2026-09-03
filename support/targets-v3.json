@@ -34,15 +34,15 @@
       ],
       "exploit": {
         "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/artifacts/pa3q-S938BXXUCZZHL/cve-2026-43499-app.so",
-        "size": 104128
+        "size": 118912
       },
       "kernelsu": {
         "url":"https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-s25u-kdp",
-        "size": 6407096
+        "size": 4972768
       },
       "kernelsu-next": {
         "url":"https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-s25u-kdp",
-        "size": 6407096
+        "size": 4972768
       }
     },
     {      "payloadId": "galaxy-s25-series-2026-06-07",
