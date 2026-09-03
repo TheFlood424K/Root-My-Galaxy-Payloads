@@ -8,7 +8,7 @@
   },
   "payloads": [
     {
-      "payloadId": "galaxy-s25-series-2026-06-07",
+      "payloadId": "pa3q-S938NKSUACZF1",
       "displayName": "Galaxy S25 series | Kernel 6.6.98",
       "pipeSzRestricted": true,
       "models": [
@@ -31,7 +31,6 @@
         "SM-S937U",
         "SM-S937U1",
         "SM-S937W",
-        "SM-S9380",
         "SM-S938B",
         "SM-S938Q",
         "SM-S938U",
