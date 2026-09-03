@@ -38,11 +38,11 @@
       },
       "kernelsu": {
         "url":"https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-s25u-kdp",
-        "size": 4972768
+        "size": 6407096
       },
       "kernelsu-next": {
         "url":"https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-s25u-kdp",
-        "size": 4972768
+        "size": 6407096
       }
     },
     {      "payloadId": "galaxy-s25-series-2026-06-07",
