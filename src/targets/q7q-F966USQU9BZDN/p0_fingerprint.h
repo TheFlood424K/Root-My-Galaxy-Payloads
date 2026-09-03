@@ -4,6 +4,8 @@
 #define P0_FINGERPRINT_H
 
 #define P0_FINGERPRINT_WORDS 8
+#define P0_FINGERPRINT_SLIDE_COUNT 32
+#define P0_FINGERPRINT_MIN_SCORE 6
 
 static const uint16_t p0_fingerprint_offsets[P0_FINGERPRINT_WORDS] = {
   0x000, 0x200, 0x400, 0x600, 0x800, 0xa00, 0xc00, 0xe00,
@@ -144,5 +146,8 @@ static const struct p0_fingerprint p0_fingerprints[] = {
     0xd503201fd503201fULL, 0xd503201fd503201fULL,
     0xd503201fd503201fULL, 0xd503201fd503201fULL } },
 };
+
+#define P0_FINGERPRINT_COUNT \
+  (sizeof(p0_fingerprints) / sizeof(p0_fingerprints[0]))
 
 #endif

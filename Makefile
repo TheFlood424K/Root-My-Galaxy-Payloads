@@ -15,13 +15,21 @@ endif
 ifeq ($(TARGET),dm1q-S911U1UES6DYI3)
 APP_TARGET_CFLAGS := -DSLIDE_STACK_WRITER=1
 endif
+ifeq ($(TARGET),gts9-X710XXS6EZF1)
+APP_TARGET_CFLAGS := -DSLIDE_STACK_WRITER=1
+endif
 ifeq ($(TARGET),a53x-A536EXXSNGZG3)
 API := 31
 endif
 
 TARGET_HEADER := src/targets/$(TARGET)/target.h
 TARGET_INCLUDE := targets/$(TARGET)/target.h
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+TARGET_CC := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android$(API)-clang
+else
 TARGET_CC := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android$(API)-clang
+endif
 
 ifeq ($(wildcard $(TARGET_CC)),)
 $(error set ANDROID_NDK_HOME to an Android NDK containing $(TARGET_CC))
@@ -66,10 +74,13 @@ APP_RELEASE_OPT := -O2
 APP_RELEASE_LINK_FLAGS := -Wl,--gc-sections -Wl,--icf=all -s
 endif
 
+# -Isrc/targets allows #include P0_FINGERPRINT_HEADER (which expands to
+# "targets/<target>/p0_fingerprint.h") to resolve for any target that
+# ships a p0_fingerprint.h alongside its target.h.
 COMMON_CFLAGS := \
   -O2 -g0 -Wall -Wextra \
   -Wno-unused-parameter -Wno-sign-compare \
-  -Isrc -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
+  -Isrc -Isrc/targets -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
   $(TARGET_CFLAGS)
 
 .DEFAULT_GOAL := all
@@ -101,7 +112,7 @@ $(APP_RELEASE): $(APP_PRELOAD_SRCS) $(TARGET_HEADER) src/offset.h src/common.h s
 	  -fno-unwind-tables -fno-asynchronous-unwind-tables \
 	  -ffunction-sections -fdata-sections \
 	  -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
-	  -Isrc -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
+	  -Isrc -Isrc/targets -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
 	  $(TARGET_CFLAGS) \
 	  $(APP_PRELOAD_SRCS) -shared -pthread \
 	  $(APP_RELEASE_LINK_FLAGS) -o $@
@@ -115,7 +126,7 @@ $(APP_STABLE): $(APP_PRELOAD_SRCS) $(TARGET_HEADER) src/offset.h src/common.h sr
 	  -fno-unwind-tables -fno-asynchronous-unwind-tables \
 	  -ffunction-sections -fdata-sections \
 	  -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
-	  -Isrc -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
+	  -Isrc -Isrc/targets -DTARGET_HEADER='"$(TARGET_INCLUDE)"' \
 	  $(APP_PRELOAD_SRCS) -shared -pthread \
 	  -Wl,--gc-sections -Wl,--icf=all -s -o $@
 	@test $$(stat -c %s $@) -le $(APP_RELEASE_SIZE)

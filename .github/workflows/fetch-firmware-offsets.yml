@@ -1,0 +1,424 @@
+# Fetches GKI kernel symbol offsets for a target from the public Google
+# Android CI (ci.android.com) System.map artifact and patches target.h.
+#
+# This approach works for any Samsung device that ships a GKI kernel
+# (S25-series and later).  It requires no Samsung FUS access, no AP blob
+# download, and no kernel module mounting.
+#
+# Artifacts are at:
+#   https://ci.android.com/builds/submitted/$BID/kernel_aarch64/latest/raw/
+# The System.map file lists every in-tree symbol with its absolute virtual
+# address.  Because the S25+ (Exynos 2500) ships unmodified GKI, all
+# in-tree offsets in target.h can be derived directly from this file.
+#
+# Triggers
+#   workflow_dispatch  -- manual, one target at a time
+#   push               -- workflow-file changes only (registration)
+#   issues (closed)    -- firmware-fetch label fires for the default target
+#
+# Permissions : contents:write  issues:write
+
+name: Fetch firmware offsets
+
+on:
+  workflow_dispatch:
+    inputs:
+      gki_build_id:
+        description: >-
+          Google GKI ci.android.com build ID for kernel_aarch64.
+          Find at https://ci.android.com under aosp_kernel-common-android15-6.6.
+        required: false
+        default: '15218529'
+      firmware_version:
+        description: >-
+          Samsung firmware version string to stamp into target.h
+          (e.g. S936U1UEUCZZHL).  Used for the FIRMWARE_VERSION define
+          and the git commit message only -- does not affect symbol fetch.
+        required: false
+        default: 'S936U1UEUCZZHL'
+      target:
+        description: >-
+          Build-system target name inside src/targets/
+          (e.g. pa2q-S936U1UEUCZZHL).
+        required: false
+        default: 'pa2q-S936U1UEUCZZHL'
+      auto_trigger_rebuild:
+        description: >-
+          Open an exploit-rebuild issue after committing so
+          rebuild-artifacts runs automatically.
+        required: false
+        default: 'true'
+      kimage_text_base_override:
+        description: >-
+          Override KIMAGE_TEXT_BASE (hex, e.g. 0xffffff8008000000).
+          Leave blank to auto-detect from _text in System.map (recommended).
+          Only set this if the target uses a non-standard kernel virtual base.
+        required: false
+        default: ''
+  push:
+    paths:
+      - '.github/workflows/fetch-firmware-offsets.yml'
+  issues:
+    types: [closed]
+
+permissions:
+  contents: write
+  issues: write
+
+# ---------------------------------------------------------------------------
+# GATE
+# ---------------------------------------------------------------------------
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run:                     ${{ steps.decide.outputs.run }}
+      gki_build_id:            ${{ steps.resolve.outputs.gki_build_id }}
+      firmware_version:        ${{ steps.resolve.outputs.firmware_version }}
+      target:                  ${{ steps.resolve.outputs.target }}
+      auto_trigger:            ${{ steps.resolve.outputs.auto_trigger }}
+      kimage_text_base_override: ${{ steps.resolve.outputs.kimage_text_base_override }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Decide whether to run
+        id: decide
+        env:
+          EVENT:        ${{ github.event_name }}
+          ISSUE_LABELS: ${{ toJson(github.event.issue.labels) }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "push" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Push trigger (registration only) -- skipping real work."
+          else
+            HAS=$(echo "$ISSUE_LABELS" \
+              | jq -r '[.[].name] | index("firmware-fetch") != null')
+            echo "run=$HAS" >> "$GITHUB_OUTPUT"
+            [ "$HAS" != "true" ] && echo "No firmware-fetch label -- skipping."
+          fi
+
+      - name: Resolve parameters
+        id: resolve
+        if: steps.decide.outputs.run == 'true'
+        env:
+          INPUT_BID:      ${{ inputs.gki_build_id }}
+          INPUT_FW:       ${{ inputs.firmware_version }}
+          INPUT_TARGET:   ${{ inputs.target }}
+          INPUT_TRIGGER:  ${{ inputs.auto_trigger_rebuild }}
+          INPUT_BASE_OVR: ${{ inputs.kimage_text_base_override }}
+          EVENT:          ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "issues" ]; then
+            BID="15218529"
+            FW="S936U1UEUCZZHL"
+            TARGET="pa2q-S936U1UEUCZZHL"
+            TRIGGER="true"
+            BASE_OVR=""
+          else
+            BID="${INPUT_BID:-15218529}"
+            FW="${INPUT_FW:-S936U1UEUCZZHL}"
+            TARGET="${INPUT_TARGET:-pa2q-S936U1UEUCZZHL}"
+            TRIGGER="${INPUT_TRIGGER:-true}"
+            BASE_OVR="${INPUT_BASE_OVR:-}"
+          fi
+
+          # Sanity-check the build ID is numeric
+          if ! echo "$BID" | grep -qE '^[0-9]+$'; then
+            echo "::error::gki_build_id must be a numeric ci.android.com build ID (got: $BID)"
+            exit 1
+          fi
+
+          echo "gki_build_id=$BID"                         >> "$GITHUB_OUTPUT"
+          echo "firmware_version=$FW"                      >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET"                             >> "$GITHUB_OUTPUT"
+          echo "auto_trigger=$TRIGGER"                     >> "$GITHUB_OUTPUT"
+          echo "kimage_text_base_override=$BASE_OVR"       >> "$GITHUB_OUTPUT"
+
+# ---------------------------------------------------------------------------
+# FETCH
+# ---------------------------------------------------------------------------
+  fetch:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BID:         ${{ needs.gate.outputs.gki_build_id }}
+      FW:          ${{ needs.gate.outputs.firmware_version }}
+      TARGET:      ${{ needs.gate.outputs.target }}
+      BASE_OVR:    ${{ needs.gate.outputs.kimage_text_base_override }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -- Step 1: Check if target.h already has this firmware version ------
+      - name: Check current target.h firmware stamp
+        id: check
+        run: |
+          HEADER="src/targets/${TARGET}/target.h"
+          if [ ! -f "$HEADER" ]; then
+            echo "::error::target.h not found at $HEADER"
+            exit 1
+          fi
+          PINNED=$(grep -oP '(?<=#define FIRMWARE_VERSION ")[^"]+' "$HEADER" || echo "")
+          echo "Pinned in target.h : ${PINNED:-<none>}"
+          echo "Requested          : $FW"
+          if [ "$PINNED" = "$FW" ]; then
+            echo "::notice::target.h already stamped with $FW and offsets are set -- nothing to do."
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          else
+            echo "SKIP=0" >> "$GITHUB_ENV"
+          fi
+
+      # -- Step 2: Fetch System.map from ci.android.com --------------------
+      - name: Download System.map from GKI build ${{ needs.gate.outputs.gki_build_id }}
+        if: env.SKIP != '1'
+        run: |
+          BASE="https://ci.android.com/builds/submitted/${BID}/kernel_aarch64/latest/raw"
+          echo "Fetching System.map from: ${BASE}/System.map"
+
+          HTTP=$(curl -sSL --retry 3 --retry-delay 5 \
+                 -o /tmp/System.map \
+                 -w "%{http_code}" \
+                 "${BASE}/System.map")
+
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::Failed to download System.map (HTTP $HTTP)."
+            echo "::error::URL tried: ${BASE}/System.map"
+            echo "::error::Verify the build ID at https://ci.android.com under aosp_kernel-common-android15-6.6."
+            exit 1
+          fi
+
+          echo "Downloaded $(wc -l < /tmp/System.map) symbol entries."
+          # Quick sanity: file should start with hex addresses
+          head -3 /tmp/System.map
+
+      # -- Step 3: Resolve KIMAGE_TEXT_BASE from System.map ----------------
+      - name: Resolve KIMAGE_TEXT_BASE from _text symbol
+        if: env.SKIP != '1'
+        run: |
+          # Priority:
+          #   1. Caller-supplied override (kimage_text_base_override input)
+          #   2. _text symbol from System.map  (most reliable)
+          #   3. Hard fallback: 0xffffff8008000000  (GKI android15-6.6 default)
+          #
+          # NOTE: GKI android15-6.6 _text is at 0xffffff8008000000.
+          #       Old GKI 5.10/5.15 used    0xffffffc008000000.
+          #       Never hard-code the constant -- always read it from the map.
+
+          FALLBACK="0xffffff8008000000"
+
+          if [ -n "$BASE_OVR" ]; then
+            KIMAGE_TEXT_BASE="$BASE_OVR"
+            echo "Using caller-supplied KIMAGE_TEXT_BASE override: $KIMAGE_TEXT_BASE"
+          else
+            TEXT_ADDR=$(grep -m1 -P '\b_text\b' /tmp/System.map | awk '{print "0x"$1}')
+            if [ -n "$TEXT_ADDR" ] && [ "$TEXT_ADDR" != "0x" ]; then
+              KIMAGE_TEXT_BASE="$TEXT_ADDR"
+              echo "Auto-detected KIMAGE_TEXT_BASE from _text: $KIMAGE_TEXT_BASE"
+            else
+              KIMAGE_TEXT_BASE="$FALLBACK"
+              echo "::warning::_text not found in System.map; falling back to $FALLBACK"
+            fi
+          fi
+
+          echo "KIMAGE_TEXT_BASE=$KIMAGE_TEXT_BASE" >> "$GITHUB_ENV"
+          echo "Resolved KIMAGE_TEXT_BASE = $KIMAGE_TEXT_BASE"
+
+      # -- Step 4: Extract symbol addresses --------------------------------
+      - name: Parse symbols from System.map
+        if: env.SKIP != '1'
+        run: |
+          extract() {
+            local SYM="$1"
+            # System.map format: <addr> <type> <name>
+            # Match exact symbol name (word-boundary) to avoid false hits.
+            grep -m1 -P "\b${SYM}\b" /tmp/System.map \
+              | awk '{print $1}' \
+              | sed 's/^0*//'
+          }
+
+          # Symbols we need for target.h _OFF defines.
+          # Format: DEFINE_NAME:symbol_name
+          SYMBOLS=(
+            "ASHMEM_IOCTL_OFF:ashmem_ioctl"
+            "ASHMEM_COMPAT_IOCTL_OFF:ashmem_compat_ioctl"
+            "ASHMEM_MMAP_OFF:ashmem_mmap"
+            "ASHMEM_OPEN_OFF:ashmem_open"
+            "ASHMEM_RELEASE_OFF:ashmem_release"
+            "ASHMEM_SHOW_FDINFO_OFF:ashmem_show_fdinfo"
+            "ASHMEM_MISC_FOPS_OFF:ashmem_misc_fops"
+            "ASHMEM_FOPS_OFF:ashmem_fops"
+            "CONFIGFS_READ_ITER_OFF:configfs_read_iter"
+            "CONFIGFS_BIN_WRITE_ITER_OFF:configfs_bin_write_iter"
+            "COPY_SPLICE_READ_OFF:copy_splice_read"
+            "NOOP_LLSEEK_OFF:noop_llseek"
+            "INIT_TASK_OFF:init_task"
+            "ROOT_TASK_GROUP_OFF:root_task_group"
+            "SELINUX_ENFORCING_OFF:selinux_enforcing"
+            "KMALLOC_CACHES_OFF:kmalloc_caches"
+            "ANON_PIPE_BUF_OPS_OFF:anon_pipe_buf_ops"
+            "CALL_USERMODEHELPER_EXEC_WORK_OFF:call_usermodehelper_exec_work"
+            "SYSTEM_UNBOUND_WQ_OFF:system_unbound_wq"
+            "SLIDE_NFULNL_LOGGER_OFF:nfulnl_log_packet"
+            "SLIDE_LOGGERS_0_1_OFF:loggers"
+            "SLIDE_RANDOM_BOOT_ID_DATA_OFF:sysctl_bootid"
+            "SLIDE_SYSCTL_BOOTID_OFF:sysctl_bootid"
+            "SLIDE_TRACEFS_WORKER_CALLER_OFF:worker_thread"
+          )
+
+          rm -f /tmp/offsets.env
+          MISSING=()
+
+          for ENTRY in "${SYMBOLS[@]}"; do
+            DEFINE="${ENTRY%%:*}"
+            SYM="${ENTRY##*:}"
+            RAW=$(extract "$SYM")
+            if [ -z "$RAW" ]; then
+              echo "  WARNING: symbol '$SYM' not found in System.map"
+              MISSING+=("$SYM")
+              continue
+            fi
+            ADDR="0x${RAW}"
+            # Compute offset = absolute_addr - KIMAGE_TEXT_BASE (resolved above)
+            OFF=$(python3 -c "print(hex(${ADDR} - ${KIMAGE_TEXT_BASE}))")
+            echo "  ${DEFINE} = ${OFF}   (from ${SYM} @ ${ADDR})"
+            echo "${DEFINE}=${OFF}" >> /tmp/offsets.env
+          done
+
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "::warning::${#MISSING[@]} symbol(s) not found in System.map: ${MISSING[*]}"
+            echo "::warning::These _OFF defines will be left at their current placeholder values."
+          fi
+
+          echo "=== Parsed offsets ==="
+          cat /tmp/offsets.env
+
+      # -- Step 5: Patch target.h ------------------------------------------
+      - name: Patch target.h
+        if: env.SKIP != '1'
+        env:
+          FIRMWARE_VERSION: ${{ needs.gate.outputs.firmware_version }}
+          GKI_BUILD_ID:     ${{ needs.gate.outputs.gki_build_id }}
+        run: |
+          python3 - <<'PYEOF'
+          import re, os, sys
+
+          header_path = "src/targets/{}/target.h".format(os.environ["TARGET"])
+          fw_version  = os.environ["FIRMWARE_VERSION"]
+          gki_bid     = os.environ["GKI_BUILD_ID"]
+          kimage_base = os.environ.get("KIMAGE_TEXT_BASE", "")
+
+          with open(header_path) as f:
+              src = f.read()
+
+          # Load offsets written by the parse step
+          offsets = {}
+          try:
+              with open("/tmp/offsets.env") as f:
+                  for line in f:
+                      line = line.strip()
+                      if '=' in line:
+                          k, v = line.split('=', 1)
+                          offsets[k.strip()] = v.strip()
+          except FileNotFoundError:
+              print("No offsets file found -- nothing to patch.", file=sys.stderr)
+              sys.exit(0)
+
+          def patch_define(src, name, hex_val):
+              pat  = r"(#define\s+{}\s+)(0x[0-9a-fA-F]+ULL|0x[0-9a-fA-F]+)".format(
+                  re.escape(name))
+              repl = r"\g<1>{}ULL".format(hex_val)
+              out, n = re.subn(pat, repl, src)
+              if n == 0:
+                  print("  WARNING: #define {} not found in target.h".format(name),
+                        file=sys.stderr)
+              return out
+
+          changed = []
+          for define, val in offsets.items():
+              src = patch_define(src, define, val)
+              changed.append("{} = {}".format(define, val))
+
+          # Update KIMAGE_TEXT_BASE in target.h to match what we resolved
+          # so that the compile-time macro arithmetic is correct.
+          if kimage_base:
+              src = patch_define(src, "KIMAGE_TEXT_BASE", kimage_base.rstrip("ULL").rstrip("ull"))
+              changed.append("KIMAGE_TEXT_BASE = {}".format(kimage_base))
+
+          # Update FIRMWARE_VERSION string
+          src = re.sub(
+              r'(\* Firmware:\s+)\S+',
+              r'\g<1>' + fw_version,
+              src,
+          )
+          # Also update the GKI build ID comment if present, or add it
+          if 'GKI build' in src:
+              src = re.sub(
+                  r'(\* GKI build\s+)\S+',
+                  r'\g<1>' + gki_bid,
+                  src,
+              )
+
+          with open(header_path, "w") as f:
+              src = f.write(src)
+
+          if changed:
+              print("Patched {} define(s):".format(len(changed)))
+              for c in changed:
+                  print("  " + c)
+          else:
+              print("No defines were updated.")
+          PYEOF
+
+          echo "=== Diff ==="
+          git diff "src/targets/${TARGET}/target.h" || true
+
+      # -- Step 6: Commit --------------------------------------------------
+      - name: Commit updated target.h
+        if: env.SKIP != '1'
+        env:
+          FW:     ${{ needs.gate.outputs.firmware_version }}
+          BID:    ${{ needs.gate.outputs.gki_build_id }}
+          TARGET: ${{ needs.gate.outputs.target }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "src/targets/${TARGET}/target.h"
+          if git diff --cached --quiet; then
+            echo "::notice::target.h unchanged after patching -- nothing to commit."
+          else
+            git commit -m "fix(${TARGET}): update kernel offsets for ${FW} (GKI build ${BID})"
+            git push origin HEAD:main
+          fi
+
+# ---------------------------------------------------------------------------
+# TRIGGER
+# ---------------------------------------------------------------------------
+  trigger-rebuild:
+    needs: [gate, fetch]
+    if: |
+      always()
+      && needs.fetch.result == 'success'
+      && needs.gate.outputs.auto_trigger == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open exploit-rebuild issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET:   ${{ needs.gate.outputs.target }}
+          FW:       ${{ needs.gate.outputs.firmware_version }}
+          BID:      ${{ needs.gate.outputs.gki_build_id }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "rebuild exploit for ${TARGET} (${FW})"\
+            --body "Auto-triggered by fetch-firmware-offsets after committing updated offsets for \`${TARGET}\` at \`${FW}\` (GKI build \`${BID}\`)." \
+            --label "exploit-rebuild"
+          echo "Opened exploit-rebuild issue."

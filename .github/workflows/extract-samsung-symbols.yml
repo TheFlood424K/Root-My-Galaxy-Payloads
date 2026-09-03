@@ -1,0 +1,692 @@
+# Extracts Samsung-private kernel symbol offsets (ashmem_misc_fops,
+# ashmem_fops) and the P0 fingerprint table for pa2q-S936U1UEUCZZHL
+# by downloading the AP firmware blob from Samsung FUS, unpacking
+# boot.img, and scanning the raw kernel Image for embedded kallsyms data.
+#
+# This is the companion to fetch-firmware-offsets.yml, which handles
+# all GKI in-tree symbols from ci.android.com.  This workflow fills
+# the two remaining TODOs in target.h that cannot come from GKI
+# System.map because they live in Samsung's out-of-tree ashmem driver.
+#
+# Prerequisites
+#   - SAMSUNG_FUS_NONCE_SEED secret (optional; fus.py derives its own
+#     nonce at runtime -- leave unset if you have no override)
+#   - pycryptodome available in the runner (installed inline below)
+#   - magiskboot binary cached as a GitHub Actions tool or downloaded
+#     from the Magisk release (handled in the setup step below)
+#
+# Firmware download strategy (Option C -- cache-first)
+#   1. Check for a GitHub Release tagged fw-<VERSION> in this repo.
+#      If one exists and contains an AP tarball asset, download it from
+#      there (fast, no Samsung FUS dependency).
+#   2. Otherwise fall back to fus.py to pull directly from Samsung.
+#      Once downloaded, the AP tarball is uploaded to a new release so
+#      future runs skip FUS entirely.
+#
+# To pre-seed the cache for a firmware version before running this
+# workflow, use the companion cache-firmware.yml workflow (manual trigger).
+#
+# Triggers
+#   workflow_dispatch  -- manual, fires immediately
+#   issues (closed)    -- fires when an issue labelled samsung-symbols
+#                         is closed (mirrors fetch-firmware-offsets gate)
+#
+# Permissions : contents:write  issues:write
+
+name: Extract Samsung symbols
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_version:
+        description: >-
+          Samsung firmware version (e.g. S936U1UEUCZZHL).
+          Used to select the FUS download and stamp target.h.
+        required: false
+        default: 'S936U1UEUCZZHL'
+      model:
+        description: Samsung model number (e.g. SM-S936U1)
+        required: false
+        default: 'SM-S936U1'
+      region:
+        description: Samsung region code (e.g. XAA)
+        required: false
+        default: 'XAA'
+      target:
+        description: >-
+          Build-system target name inside src/targets/
+          (e.g. pa2q-S936U1UEUCZZHL)
+        required: false
+        default: 'pa2q-S936U1UEUCZZHL'
+      auto_trigger_rebuild:
+        description: Open an exploit-rebuild issue after committing.
+        required: false
+        default: 'true'
+      kimage_text_base:
+        description: >-
+          KIMAGE_TEXT_BASE hex value (e.g. 0xffffffc080000000).
+          Must match the value already in target.h.
+        required: false
+        default: '0xffffffc080000000'
+      p0_probe_offset:
+        description: >-
+          P0_ORACLE_PROBE_OFFSET hex (e.g. 0x1f0000).
+          Fingerprint words are read at Image[probe_offset - slide + fp_offset].
+        required: false
+        default: '0x1f0000'
+  issues:
+    types: [closed]
+
+permissions:
+  contents: write
+  issues: write
+
+# ---------------------------------------------------------------------------
+# GATE
+# ---------------------------------------------------------------------------
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run:              ${{ steps.decide.outputs.run }}
+      firmware_version: ${{ steps.resolve.outputs.firmware_version }}
+      model:            ${{ steps.resolve.outputs.model }}
+      region:           ${{ steps.resolve.outputs.region }}
+      target:           ${{ steps.resolve.outputs.target }}
+      auto_trigger:     ${{ steps.resolve.outputs.auto_trigger }}
+      kimage_text_base: ${{ steps.resolve.outputs.kimage_text_base }}
+      p0_probe_offset:  ${{ steps.resolve.outputs.p0_probe_offset }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Decide whether to run
+        id: decide
+        env:
+          EVENT:        ${{ github.event_name }}
+          ISSUE_LABELS: ${{ toJson(github.event.issue.labels) }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            HAS=$(echo "$ISSUE_LABELS" \
+              | jq -r '[.[].name] | index("samsung-symbols") != null')
+            echo "run=$HAS" >> "$GITHUB_OUTPUT"
+            [ "$HAS" != "true" ] && echo "No samsung-symbols label -- skipping."
+          fi
+
+      - name: Resolve parameters
+        id: resolve
+        if: steps.decide.outputs.run == 'true'
+        env:
+          INPUT_FW:      ${{ inputs.firmware_version }}
+          INPUT_MODEL:   ${{ inputs.model }}
+          INPUT_REGION:  ${{ inputs.region }}
+          INPUT_TARGET:  ${{ inputs.target }}
+          INPUT_TRIGGER: ${{ inputs.auto_trigger_rebuild }}
+          INPUT_BASE:    ${{ inputs.kimage_text_base }}
+          INPUT_PROBE:   ${{ inputs.p0_probe_offset }}
+          EVENT:         ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "issues" ]; then
+            FW="S936U1UEUCZZHL"
+            MODEL="SM-S936U1"
+            REGION="XAA"
+            TARGET="pa2q-S936U1UEUCZZHL"
+            TRIGGER="true"
+            BASE="0xffffffc080000000"
+            PROBE="0x1f0000"
+          else
+            FW="${INPUT_FW:-S936U1UEUCZZHL}"
+            MODEL="${INPUT_MODEL:-SM-S936U1}"
+            REGION="${INPUT_REGION:-XAA}"
+            TARGET="${INPUT_TARGET:-pa2q-S936U1UEUCZZHL}"
+            TRIGGER="${INPUT_TRIGGER:-true}"
+            BASE="${INPUT_BASE:-0xffffffc080000000}"
+            PROBE="${INPUT_PROBE:-0x1f0000}"
+          fi
+          echo "firmware_version=$FW"   >> "$GITHUB_OUTPUT"
+          echo "model=$MODEL"           >> "$GITHUB_OUTPUT"
+          echo "region=$REGION"         >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET"         >> "$GITHUB_OUTPUT"
+          echo "auto_trigger=$TRIGGER"  >> "$GITHUB_OUTPUT"
+          echo "kimage_text_base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "p0_probe_offset=$PROBE" >> "$GITHUB_OUTPUT"
+
+# ---------------------------------------------------------------------------
+# EXTRACT
+# ---------------------------------------------------------------------------
+  extract:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      FW:      ${{ needs.gate.outputs.firmware_version }}
+      MODEL:   ${{ needs.gate.outputs.model }}
+      REGION:  ${{ needs.gate.outputs.region }}
+      TARGET:  ${{ needs.gate.outputs.target }}
+      BASE:    ${{ needs.gate.outputs.kimage_text_base }}
+      PROBE:   ${{ needs.gate.outputs.p0_probe_offset }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -- Step 1: Install Python dependencies -----------------------------
+      - name: Install pycryptodome
+        run: pip3 install --quiet pycryptodome
+
+      # -- Step 2: Install magiskboot ----------------------------------------
+      - name: Install magiskboot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FALLBACK_URL="https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk"
+          MAGISK_URL=$(curl -sSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/topjohnwu/Magisk/releases/latest" \
+            | jq -r '.assets[] | select(.name | test("Magisk-v[0-9]+\\.apk")) | .browser_download_url' \
+            | head -1)
+          if [ -z "$MAGISK_URL" ]; then
+            echo "::warning::GitHub API returned no asset URL; falling back to pinned v30.7."
+            MAGISK_URL="$FALLBACK_URL"
+          fi
+          echo "Downloading Magisk from: $MAGISK_URL"
+          curl -sSL -o /tmp/magisk.apk "$MAGISK_URL"
+          unzip -p /tmp/magisk.apk lib/x86_64/libmagiskboot.so > /usr/local/bin/magiskboot
+          chmod +x /usr/local/bin/magiskboot
+          magiskboot --help 2>&1 | head -2 || true
+          echo "magiskboot installed."
+
+      # -- Step 3: Firmware download (cache-first) --------------------------
+      # Check for a release tagged fw-<VERSION>.  If an AP tarball asset
+      # exists there, download it directly.  Otherwise fall back to fus.py
+      # and then upload the result to a new release for future runs.
+      - name: Download AP firmware (cache-first, FUS fallback)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/fw
+          RELEASE_TAG="fw-${FW}"
+          echo "Checking for cached release: $RELEASE_TAG ..."
+
+          # --- Try the cache ---
+          ASSET_URL=$(curl -sSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+            2>/dev/null \
+            | jq -r '.assets[] | select(.name | test("AP_.*\\.tar|ap_.*\\.tar"; "i")) | .browser_download_url' \
+            | head -1 || true)
+
+          if [ -n "$ASSET_URL" ]; then
+            echo "::notice::Cache HIT -- downloading AP tarball from release $RELEASE_TAG"
+            curl -sSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -L -o /tmp/fw/AP_cached.tar \
+              "$ASSET_URL"
+            AP_TAR=/tmp/fw/AP_cached.tar
+            echo "AP_TAR=$AP_TAR" >> "$GITHUB_ENV"
+            echo "Located AP tarball (cached): $AP_TAR  ($(du -sh "$AP_TAR" | cut -f1))"
+            exit 0
+          fi
+
+          # --- Cache MISS: fall back to FUS ---
+          echo "::notice::Cache MISS for $RELEASE_TAG -- fetching from Samsung FUS..."
+          python3 scripts/fus.py download "$MODEL" "$REGION" "$FW" /tmp/fw
+
+          AP_TAR=$(ls /tmp/fw/AP_*.tar* /tmp/fw/*AP*.tar* 2>/dev/null | head -1 || true)
+          if [ -z "$AP_TAR" ]; then
+            AP_TAR=$(ls /tmp/fw/*.tar* 2>/dev/null | head -1 || true)
+          fi
+          if [ -z "$AP_TAR" ]; then
+            echo "::error::Could not locate AP tarball in /tmp/fw after FUS download."
+            ls -lh /tmp/fw/
+            exit 1
+          fi
+          echo "AP_TAR=$AP_TAR" >> "$GITHUB_ENV"
+          echo "Located AP tarball (FUS): $AP_TAR  ($(du -sh "$AP_TAR" | cut -f1))"
+
+          # --- Upload to release cache so next run skips FUS ---
+          echo "Uploading AP tarball to release cache ($RELEASE_TAG)..."
+          ASSET_NAME="$(basename "$AP_TAR")"
+
+          # Create the release (idempotent: skip if it already exists)
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Firmware cache: $FW" \
+            --notes "Auto-cached AP tarball for $MODEL $FW ($REGION). Used by extract-samsung-symbols CI to avoid Samsung FUS network blocks." \
+            --prerelease \
+            2>/dev/null || echo "Release $RELEASE_TAG already exists -- skipping create."
+
+          gh release upload "$RELEASE_TAG" "$AP_TAR#${ASSET_NAME}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          echo "Uploaded $ASSET_NAME to release $RELEASE_TAG."
+
+      # -- Step 4: Extract boot.img from AP tarball -------------------------
+      - name: Extract boot.img from AP tarball
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/apunpack
+          TARFILE="$AP_TAR"
+          if [[ "$TARFILE" == *.md5 ]]; then
+            cp "$TARFILE" "${TARFILE%.md5}"
+            TARFILE="${TARFILE%.md5}"
+          fi
+          if [[ "$TARFILE" == *.lz4 ]]; then
+            echo "Decompressing LZ4 AP tarball..."
+            lz4 -d "$TARFILE" /tmp/ap_raw.tar
+            TARFILE=/tmp/ap_raw.tar
+          fi
+          echo "Listing tarball contents..."
+          tar -tf "$TARFILE" | grep -i boot || true
+          tar -C /tmp/apunpack -xf "$TARFILE" boot.img 2>/dev/null \
+            || tar -C /tmp/apunpack -xf "$TARFILE" \
+                 $(tar -tf "$TARFILE" | grep -i '^boot\.img' | head -1) \
+            || { echo "::error::boot.img not found in AP tarball."; tar -tf "$TARFILE"; exit 1; }
+          BOOT_IMG=$(ls /tmp/apunpack/boot.img /tmp/apunpack/*/boot.img 2>/dev/null | head -1)
+          echo "BOOT_IMG=$BOOT_IMG" >> "$GITHUB_ENV"
+          echo "boot.img: $BOOT_IMG  ($(du -sh "$BOOT_IMG" | cut -f1))"
+
+      # -- Step 5: Unpack boot.img with magiskboot ---------------------------
+      - name: Unpack boot.img
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bootunpack
+          cp "$BOOT_IMG" /tmp/bootunpack/boot.img
+          cd /tmp/bootunpack
+          magiskboot unpack boot.img
+          if [ ! -f kernel ]; then
+            echo "::error::magiskboot did not produce a 'kernel' file."
+            ls -lh /tmp/bootunpack/
+            exit 1
+          fi
+          echo "Unpacked kernel: $(ls -lh kernel)"
+          echo "KERNEL_COMP=/tmp/bootunpack/kernel" >> "$GITHUB_ENV"
+
+      # -- Step 6: Decompress the kernel Image ------------------------------
+      - name: Decompress kernel Image if needed
+        run: |
+          set -euo pipefail
+          KFILE="$KERNEL_COMP"
+          MAGIC=$(xxd -p -l 4 "$KFILE")
+          case "$MAGIC" in
+            02214c18|02214c19)
+              echo "LZ4 kernel detected -- decompressing..."
+              lz4 -d "$KFILE" /tmp/kernel_raw || unlz4 "$KFILE" /tmp/kernel_raw
+              ;;
+            1f8b0800|1f8b08*)
+              echo "GZIP kernel detected -- decompressing..."
+              zcat "$KFILE" > /tmp/kernel_raw
+              ;;
+            d00dfeed|cefaedfe)
+              echo "Kernel appears already decompressed (magic $MAGIC)."
+              cp "$KFILE" /tmp/kernel_raw
+              ;;
+            *)
+              echo "Unknown magic $MAGIC -- attempting LZ4 decompress..."
+              if lz4 -d "$KFILE" /tmp/kernel_raw 2>/dev/null; then
+                echo "LZ4 succeeded."
+              elif zcat "$KFILE" > /tmp/kernel_raw 2>/dev/null; then
+                echo "GZIP succeeded."
+              else
+                echo "::warning::Could not identify compression; using file as-is."
+                cp "$KFILE" /tmp/kernel_raw
+              fi
+              ;;
+          esac
+          echo "Raw kernel Image: $(ls -lh /tmp/kernel_raw)"
+          echo "KERNEL_RAW=/tmp/kernel_raw" >> "$GITHUB_ENV"
+
+      # -- Step 7: Scan kallsyms for Samsung-private symbol addresses --------
+      - name: Scan kallsyms for Samsung-private symbols
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import struct, sys, os, re
+
+          IMAGE = os.environ["KERNEL_RAW"]
+          BASE  = int(os.environ["BASE"], 16)
+
+          WANT = {"ashmem_misc_fops", "ashmem_fops"}
+
+          with open(IMAGE, "rb") as f:
+              data = f.read()
+
+          size = len(data)
+          print(f"Image size: {size:#x} bytes", flush=True)
+
+          def is_kern_va(v):
+              hi = (v >> 32) & 0xffffffff
+              return hi in (0xffffff80, 0xffffff81, 0xffffffc0, 0xffffffc1,
+                            0xffffff82, 0xffffffc2)
+
+          ALIGN = 8
+          best_start = -1
+          best_len   = 0
+          run_start  = -1
+          run_len    = 0
+
+          for off in range(0, size - 8, ALIGN):
+              v = struct.unpack_from("<Q", data, off)[0]
+              if is_kern_va(v):
+                  if run_start < 0:
+                      run_start = off
+                      run_len   = 1
+                  else:
+                      run_len += 1
+                  if run_len > best_len:
+                      best_len   = run_len
+                      best_start = run_start
+              else:
+                  run_start = -1
+                  run_len   = 0
+
+          if best_len < 1000:
+              print(f"::error::Could not find kallsyms_addresses table "
+                    f"(best run was only {best_len} entries).", flush=True)
+              sys.exit(1)
+
+          print(f"kallsyms_addresses[] candidate: offset {best_start:#x}, "
+                f"{best_len} entries", flush=True)
+
+          addrs_off = best_start
+          num_syms  = best_len
+          addrs_end = addrs_off + num_syms * 8
+
+          names_search_start = (addrs_end + 3) & ~3
+          ns_val = struct.unpack_from("<I", data, names_search_start)[0]
+          if abs(ns_val - num_syms) < num_syms * 0.05:
+              num_syms = ns_val
+              names_off = names_search_start + 4
+              print(f"kallsyms_num_syms = {num_syms} (confirmed from table)", flush=True)
+          else:
+              names_off = names_search_start
+              print(f"::warning::num_syms mismatch ({ns_val} vs {num_syms}); "
+                    f"using address-run count.", flush=True)
+
+          def count_tokens(off):
+              pos   = off
+              count = 0
+              while pos < size and count < 300:
+                  nul = data.find(b"\x00", pos)
+                  if nul < 0 or nul - pos > 16:
+                      break
+                  count += 1
+                  pos = nul + 1
+              return count, pos
+
+          token_table_off = -1
+          search_from = names_off + num_syms
+          for probe in range(search_from, min(search_from + 0x200000, size - 512), 1):
+              if data[probe] == 0:
+                  continue
+              cnt, end = count_tokens(probe)
+              if 250 <= cnt <= 260:
+                  token_table_off = probe
+                  print(f"kallsyms_token_table candidate: offset {probe:#x} "
+                        f"({cnt} tokens)", flush=True)
+                  break
+
+          if token_table_off < 0:
+              print("::error::Could not locate kallsyms_token_table.", flush=True)
+              sys.exit(1)
+
+          tokens = []
+          pos = token_table_off
+          for _ in range(256):
+              nul = data.find(b"\x00", pos)
+              if nul < 0:
+                  break
+              tokens.append(data[pos:nul])
+              pos = nul + 1
+
+          print(f"Token sample: {[t.decode(errors='replace') for t in tokens[:8]]}", flush=True)
+
+          def decode_names(data, off, count, tokens):
+              pos = off
+              for i in range(count):
+                  if pos >= len(data):
+                      break
+                  ntoken = data[pos]; pos += 1
+                  if pos + ntoken > len(data):
+                      break
+                  idxs = data[pos:pos + ntoken]; pos += ntoken
+                  name = b"".join(tokens[b] for b in idxs[1:])
+                  yield i, name.decode(errors="replace")
+
+          found = {}
+          for idx, name in decode_names(data, names_off, num_syms, tokens):
+              if name in WANT:
+                  va = struct.unpack_from("<Q", data, addrs_off + idx * 8)[0]
+                  off_val = va - BASE
+                  found[name] = (va, off_val)
+                  print(f"  {name}: VA={va:#018x}  offset={off_val:#010x}", flush=True)
+                  if len(found) == len(WANT):
+                      break
+
+          if len(found) < len(WANT):
+              missing = WANT - set(found)
+              print(f"::warning::Not found in kallsyms: {missing}", flush=True)
+          if not found:
+              print("::error::No target symbols found -- aborting.", flush=True)
+              sys.exit(1)
+
+          with open("/tmp/samsung_offsets.env", "w") as f:
+              for sym, (va, off_val) in found.items():
+                  define = {
+                      "ashmem_misc_fops": "ASHMEM_MISC_FOPS_OFF",
+                      "ashmem_fops":      "ASHMEM_FOPS_OFF",
+                  }[sym]
+                  f.write(f"{define}={hex(off_val)}\n")
+                  f.write(f"VA_{sym}={hex(va)}\n")
+
+          print("Wrote /tmp/samsung_offsets.env:", flush=True)
+          with open("/tmp/samsung_offsets.env") as f:
+              print(f.read(), flush=True)
+          PYEOF
+
+      # -- Step 8: Extract P0 fingerprint words from Image ------------------
+      - name: Extract P0 fingerprint words
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import struct, os, sys
+
+          IMAGE     = os.environ["KERNEL_RAW"]
+          PROBE_OFF = int(os.environ["PROBE"], 16)
+
+          SLIDE_CANDIDATES = [s * 0x10000 for s in range(32)]
+          FP_OFFSETS = [0x000, 0x200, 0x400, 0x600, 0x800, 0xa00, 0xc00, 0xe00]
+
+          with open(IMAGE, "rb") as f:
+              data = f.read()
+
+          rows = []
+          for slide in SLIDE_CANDIDATES:
+              file_base = PROBE_OFF - slide
+              words = []
+              valid = True
+              for fp_off in FP_OFFSETS:
+                  pos = file_base + fp_off
+                  if pos < 0 or pos + 2 > len(data):
+                      valid = False
+                      break
+                  words.append(struct.unpack_from("<H", data, pos)[0])
+              if not valid:
+                  words = [0] * len(FP_OFFSETS)
+              rows.append((slide, words))
+              print(f"  slide {slide:#08x}: {[hex(w) for w in words]}", flush=True)
+
+          import json
+          with open("/tmp/p0_fingerprints.json", "w") as f:
+              json.dump(rows, f)
+          print("Wrote /tmp/p0_fingerprints.json", flush=True)
+          PYEOF
+
+      # -- Step 9: Patch target.h -------------------------------------------
+      - name: Patch target.h with Samsung-private symbol offsets
+        env:
+          TARGET: ${{ needs.gate.outputs.target }}
+          FW:     ${{ needs.gate.outputs.firmware_version }}
+        run: |
+          python3 - <<'PYEOF'
+          import re, os, sys
+
+          header_path = "src/targets/{}/target.h".format(os.environ["TARGET"])
+          fw          = os.environ["FW"]
+
+          with open(header_path) as f:
+              src = f.read()
+
+          offsets = {}
+          try:
+              with open("/tmp/samsung_offsets.env") as f:
+                  for line in f:
+                      line = line.strip()
+                      if '=' in line and not line.startswith("VA_"):
+                          k, v = line.split('=', 1)
+                          offsets[k.strip()] = v.strip()
+          except FileNotFoundError:
+              print("No samsung_offsets.env -- nothing to patch.", file=sys.stderr)
+              sys.exit(0)
+
+          def patch_define(src, name, hex_val):
+              pat  = r"(#define\s+{}\s+)(0x[0-9a-fA-F]+ULL|0x[0-9a-fA-F]+)".format(
+                  re.escape(name))
+              repl = r"\g<1>{}ULL".format(hex_val)
+              out, n = re.subn(pat, repl, src)
+              if n == 0:
+                  print("  WARNING: #define {} not found".format(name), file=sys.stderr)
+              return out
+
+          changed = []
+          for define, val in offsets.items():
+              src = patch_define(src, define, val)
+              changed.append("{} = {}".format(define, val))
+
+          if "ASHMEM_MISC_FOPS_OFF" in offsets:
+              src = patch_define(src, "SLIDE_S928_PROBE_TARGET_IMAGE_OFF",
+                                 offsets["ASHMEM_MISC_FOPS_OFF"])
+              changed.append("SLIDE_S928_PROBE_TARGET_IMAGE_OFF = {}".format(
+                  offsets["ASHMEM_MISC_FOPS_OFF"]))
+
+          for define in list(offsets) + ["SLIDE_S928_PROBE_TARGET_IMAGE_OFF"]:
+              src = re.sub(
+                  r"(#define\s+{}\s+0x[0-9a-fA-F]+ULL)\s*/\*.*?TODO.*?\*/".format(
+                      re.escape(define)),
+                  r"\1",
+                  src,
+              )
+
+          with open(header_path, "w") as f:
+              f.write(src)
+
+          print("Patched {} define(s) in {}:".format(len(changed), header_path))
+          for c in changed:
+              print("  " + c)
+          PYEOF
+
+      # -- Step 10: Patch p0_fingerprint.h ----------------------------------
+      - name: Patch p0_fingerprint.h with real Image words
+        env:
+          TARGET: ${{ needs.gate.outputs.target }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re
+
+          fp_path = "src/targets/{}/p0_fingerprint.h".format(os.environ["TARGET"])
+
+          with open("/tmp/p0_fingerprints.json") as f:
+              rows = json.load(f)
+
+          with open(fp_path) as f:
+              src = f.read()
+
+          def fmt_row(slide, words):
+              hex_words = ", ".join("0x{:04x}ULL".format(w) for w in words)
+              return "  {{ 0x{:06x}ULL, {{ {} }} }},".format(slide, hex_words)
+
+          new_rows = "\n".join(fmt_row(int(s), w) for s, w in rows)
+
+          src = re.sub(
+              r"(static const struct p0_fingerprint "
+              r"p0_fingerprints\[P0_FINGERPRINT_SLIDE_COUNT\]\s*=\s*\{)[^}]+"
+              r"(\};)",
+              r"\1\n" + new_rows + r"\n\2",
+              src,
+              flags=re.DOTALL,
+          )
+
+          src = re.sub(
+              r"// TODO: populate words from a rooted.*?(?=\n// Current values)",
+              "// Words extracted from GKI Image by extract-samsung-symbols CI.",
+              src,
+              flags=re.DOTALL,
+          )
+          src = re.sub(
+              r"// Current values are the same uniform BL/B placeholder.*?\n",
+              "",
+              src,
+              flags=re.DOTALL,
+          )
+
+          with open(fp_path, "w") as f:
+              f.write(src)
+
+          print("Patched {}  ({} slide rows)".format(fp_path, len(rows)))
+          PYEOF
+
+      # -- Step 11: Commit -------------------------------------------------
+      - name: Commit patched files
+        env:
+          FW:     ${{ needs.gate.outputs.firmware_version }}
+          TARGET: ${{ needs.gate.outputs.target }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "src/targets/${TARGET}/target.h" \
+                  "src/targets/${TARGET}/p0_fingerprint.h"
+          if git diff --cached --quiet; then
+            echo "::notice::No changes after patching -- files already up to date."
+          else
+            echo "=== target.h diff ==="
+            git diff --cached "src/targets/${TARGET}/target.h" || true
+            git commit -m \
+              "fix(${TARGET}): populate Samsung-private offsets and P0 fingerprints for ${FW}"
+            git push origin HEAD:main
+            echo "Committed and pushed."
+          fi
+
+# ---------------------------------------------------------------------------
+# TRIGGER REBUILD
+# ---------------------------------------------------------------------------
+  trigger-rebuild:
+    needs: [gate, extract]
+    if: |
+      always()
+      && needs.extract.result == 'success'
+      && needs.gate.outputs.auto_trigger == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open exploit-rebuild issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET:   ${{ needs.gate.outputs.target }}
+          FW:       ${{ needs.gate.outputs.firmware_version }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "rebuild exploit for ${TARGET} (${FW}) -- Samsung symbols populated" \
+            --body "Auto-triggered by extract-samsung-symbols after committing \
+          real \`ashmem_misc_fops\`, \`ashmem_fops\`, and P0 fingerprint data \
+          for \`${TARGET}\` at firmware \`${FW}\`." \
+            --label "exploit-rebuild"
+          echo "Opened exploit-rebuild issue."
