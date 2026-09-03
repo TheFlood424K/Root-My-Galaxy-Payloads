@@ -57,14 +57,13 @@
 #define SLIDE_USE_FAKE_TASK         1
 #define COMPACT_RT_MUTEX_WAITER     1
 
-/* TODO: verify both values from live S936U1UEUCZZHL device:
+/* Confirmed from live SM-S936U1 (S936U1UEUCZZHL):
  *   adb shell cat /sys/kernel/tracing/events/sched/sched_blocked_reason/id
- *   nm vmlinux | grep worker_thread  (schedule-path site)
- * Then uncomment APP_TRACEFS_KASLR_DIRECT.
+ *   → 109
  */
-#define SLIDE_TRACEFS_EVENT_ID          106   /* TODO: verify for S936U1UEUCZZHL */
+#define SLIDE_TRACEFS_EVENT_ID          109
 #define SLIDE_TRACEFS_WORKER_CALLER_OFF 0xd98e4ULL
-/* #define APP_TRACEFS_KASLR_DIRECT        1 */
+#define APP_TRACEFS_KASLR_DIRECT        1
 
 #define SLIDE_PSELECT_WORD_SHIFT    3
 #define SLIDE_P0_OFFSET_CANDIDATES \
