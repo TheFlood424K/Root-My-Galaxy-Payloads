@@ -171,14 +171,26 @@ jobs:
       # -- Step 2: Install magiskboot ----------------------------------------
       # magiskboot is used to unpack the Samsung boot.img (AOSP v3/v4 format).
       # We pull the latest Magisk release asset directly from GitHub releases.
+      # GITHUB_TOKEN is passed to avoid unauthenticated rate-limit (60 req/h)
+      # which returns an empty body and leaves MAGISK_URL blank (curl error 3).
+      # A pinned fallback URL for v30.7 is used if the API call fails or
+      # returns no matching asset.
       - name: Install magiskboot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Pull the latest stable Magisk release and extract magiskboot
+          FALLBACK_URL="https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk"
           MAGISK_URL=$(curl -sSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/topjohnwu/Magisk/releases/latest" \
             | jq -r '.assets[] | select(.name | test("Magisk-v[0-9]+\\.apk")) | .browser_download_url' \
             | head -1)
+          if [ -z "$MAGISK_URL" ]; then
+            echo "::warning::GitHub API returned no asset URL; falling back to pinned v30.7."
+            MAGISK_URL="$FALLBACK_URL"
+          fi
           echo "Downloading Magisk from: $MAGISK_URL"
           curl -sSL -o /tmp/magisk.apk "$MAGISK_URL"
           # magiskboot lives at lib/x86_64/libmagiskboot.so inside the APK
