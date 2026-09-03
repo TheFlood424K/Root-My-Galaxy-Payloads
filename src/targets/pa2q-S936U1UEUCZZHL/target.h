@@ -34,7 +34,7 @@
 /* ------------------------------------------------------------------ */
 /* KASLR / memory-map constants                                        */
 /* ------------------------------------------------------------------ */
-#define KIMAGE_TEXT_BASE        0xffffff8008000000ULL
+#define KIMAGE_TEXT_BASE        0xffffffc080000000ULL
 #define P0_PAGE_OFFSET          0xffffff8000000000ULL
 #define P0_PHYS_OFFSET          0x80000000ULL
 #define P0_KERNEL_PHYS_LOAD     0x80080000ULL
@@ -120,22 +120,22 @@
 /* Kernel symbol offsets (GKI build 15218529 System.map)              */
 /* ------------------------------------------------------------------ */
 #define ASHMEM_MISC_FOPS_OFF            0x023bb5b0ULL  /* TODO: verify Samsung-private */
-#define ASHMEM_FOPS_OFF                 0x12f9188ULL   /* TODO: verify Samsung-private */
-#define ASHMEM_IOCTL_OFF                0xc907f4ULL
+#define ASHMEM_FOPS_OFF                 0x12f8e08ULL   /* TODO: verify Samsung-private */
+#define ASHMEM_IOCTL_OFF                0xc9066cULL
 #define ASHMEM_COMPAT_IOCTL_OFF         0xd3ac4cULL
-#define ASHMEM_MMAP_OFF                 0xc90f04ULL
-#define ASHMEM_OPEN_OFF                 0xc91124ULL
-#define ASHMEM_RELEASE_OFF              0xc911acULL
-#define ASHMEM_SHOW_FDINFO_OFF          0xc91238ULL
-#define CONFIGFS_READ_ITER_OFF          0x491b28ULL
-#define CONFIGFS_BIN_WRITE_ITER_OFF     0x492054ULL
-#define COPY_SPLICE_READ_OFF            0x4154a8ULL
-#define NOOP_LLSEEK_OFF                 0x3c81e0ULL
+#define ASHMEM_MMAP_OFF                 0xc90d7cULL
+#define ASHMEM_OPEN_OFF                 0xc90f9cULL
+#define ASHMEM_RELEASE_OFF              0xc91024ULL
+#define ASHMEM_SHOW_FDINFO_OFF          0xc910b0ULL
+#define CONFIGFS_READ_ITER_OFF          0x4919c0ULL
+#define CONFIGFS_BIN_WRITE_ITER_OFF     0x491eecULL
+#define COPY_SPLICE_READ_OFF            0x415340ULL
+#define NOOP_LLSEEK_OFF                 0x3c8078ULL
 #define INIT_TASK_OFF                   0x213e080ULL
 #define ROOT_TASK_GROUP_OFF             0x2338780ULL
 #define SELINUX_ENFORCING_OFF           0x2521588ULL
-#define KMALLOC_CACHES_OFF              0x1686858ULL
-#define ANON_PIPE_BUF_OPS_OFF           0x1177e08ULL
+#define KMALLOC_CACHES_OFF              0x16862b8ULL
+#define ANON_PIPE_BUF_OPS_OFF           0x1177a88ULL
 
 #define ASHMEM_MISC_FOPS  (KIMAGE_TEXT_BASE + ASHMEM_MISC_FOPS_OFF)
 #define ASHMEM_FOPS       (KIMAGE_TEXT_BASE + ASHMEM_FOPS_OFF)
@@ -171,7 +171,7 @@
 /* ------------------------------------------------------------------ */
 /* Slide / netfilter / sysctl helpers                                  */
 /* ------------------------------------------------------------------ */
-#define SLIDE_NFULNL_LOGGER_OFF         0xe65984ULL
+#define SLIDE_NFULNL_LOGGER_OFF         0xe657fcULL
 #define SLIDE_LOGGERS_0_1_OFF           0x2131fa8ULL
 #define SLIDE_RB_PARENT_TYPE_RESTORE    1ULL
 #define SLIDE_RANDOM_BOOT_ID_DATA_OFF   0x239b0f0ULL
