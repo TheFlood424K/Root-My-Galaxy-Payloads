@@ -18,6 +18,8 @@ import hmac
 import os
 import re
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -31,6 +33,10 @@ USER_AGENT = (
 
 _K1 = "vicopx7dqu06em2f"
 _K2 = "waxd789d2eonk84g"
+
+# Retry settings for transient network errors (timeouts, connection resets)
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [5, 15, 30]   # seconds to wait before attempt 2, 3, 4
 
 
 # ---------------------------------------------------------------------------
@@ -54,17 +60,39 @@ def _getauth(nonce: str) -> str:
     )
 
 
-def _post(path: str, body: str, auth: str = "") -> tuple[str, str]:
+def _post(path: str, body: str, auth: str = "", timeout: int = 60) -> tuple[str, str]:
     url = FUS_HOST + path
     req = urllib.request.Request(url, data=body.encode(), method="POST")
     req.add_header("Content-Type", "application/xml")
     req.add_header("User-Agent", USER_AGENT)
     if auth:
         req.add_header("Authorization", auth)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        nonce = r.getheader("NONCE", "")
-        text = r.read().decode(errors="replace")
-    return text, nonce
+
+    last_exc: Exception = RuntimeError("No attempts made")
+    for attempt in range(_MAX_RETRIES):
+        if attempt > 0:
+            wait = _RETRY_BACKOFF[attempt - 1]
+            print(
+                "  [fus] network error on attempt {}/{}; retrying in {}s...".format(
+                    attempt, _MAX_RETRIES, wait
+                ),
+                flush=True,
+            )
+            time.sleep(wait)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                nonce = r.getheader("NONCE", "")
+                text = r.read().decode(errors="replace")
+            return text, nonce
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_exc = exc
+            print("  [fus] attempt {} failed: {}".format(attempt + 1, exc), flush=True)
+
+    raise RuntimeError(
+        "FUS request to {} failed after {} attempts. Last error: {}".format(
+            path, _MAX_RETRIES, last_exc
+        )
+    )
 
 
 def _xml(text: str, tag: str) -> str:
