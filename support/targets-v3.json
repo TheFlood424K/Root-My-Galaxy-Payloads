@@ -37,12 +37,12 @@
         "size": 104128
       },
       "kernelsu": {
-        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-pa3q-S938BXXUCZZHL-ksunext-v3.3.0",
-        "size": 3994040
+        "url":"https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-s25u-kdp",
+        "size": 4972768
       },
       "kernelsu-next": {
-        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-pa3q-S938BXXUCZZHL-ksunext-v3.3.0",
-        "size": 3994040 
+        "url":"https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-s25u-kdp",
+        "size": 4972768
       }
     },
     {      "payloadId": "galaxy-s25-series-2026-06-07",
