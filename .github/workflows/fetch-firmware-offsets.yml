@@ -1,44 +1,45 @@
-# Fetches the Samsung AP firmware for a target via Samsung NeoFUS (direct HTTP),
-# extracts the vendor_dlkm image, mounts it, reads symbol offsets from the
-# relevant .ko files, and commits the updated target.h back to main so the
-# rebuild-artifacts workflow can consume it.
+# Fetches GKI kernel symbol offsets for a target from the public Google
+# Android CI (ci.android.com) System.map artifact and patches target.h.
 #
-# No third-party Python packages required for the auth/download layer.
-# pycryptodome is installed at runtime and used only for .enc4/.enc2 decrypt.
+# This approach works for any Samsung device that ships a GKI kernel
+# (S25-series and later).  It requires no Samsung FUS access, no AP blob
+# download, and no kernel module mounting.
+#
+# Artifacts are at:
+#   https://ci.android.com/builds/submitted/$BID/kernel_aarch64/latest/raw/
+# The System.map file lists every in-tree symbol with its absolute virtual
+# address.  Because the S25+ (Exynos 2500) ships unmodified GKI, all
+# in-tree offsets in target.h can be derived directly from this file.
 #
 # Triggers
-#   workflow_dispatch  -- manual run, one target at a time
-#   push               -- workflow file change only; fires once to register the
-#                         workflow in the Actions UI, then skips all real work
+#   workflow_dispatch  -- manual, one target at a time
+#   push               -- workflow-file changes only (registration)
 #   issues (closed)    -- firmware-fetch label fires for the default target
 #
-# Secrets required : none (Samsung FUS is unauthenticated for latest firmware)
-# Permissions      : contents:write  issues:write
+# Permissions : contents:write  issues:write
 
 name: Fetch firmware offsets
 
 on:
   workflow_dispatch:
     inputs:
-      model:
-        description: 'Samsung model number (e.g. SM-S936U1)'
+      gki_build_id:
+        description: >-
+          Google GKI ci.android.com build ID for kernel_aarch64.
+          Find at https://ci.android.com under aosp_kernel-common-android15-6.6.
         required: false
-        default: 'SM-S936U1'
-      region:
-        description: 'Region / CSC (e.g. XAA, TMB)'
-        required: false
-        default: 'XAA'
+        default: '15218529'
       firmware_version:
         description: >-
-          Full PDA/firmware version string (e.g. S936U1UESCCZF9).
-          Leave blank to fetch the latest available version.
+          Samsung firmware version string to stamp into target.h
+          (e.g. S936U1UEUCZZHL).  Used for the FIRMWARE_VERSION define
+          and the git commit message only -- does not affect symbol fetch.
         required: false
-        default: ''
+        default: 'S936U1UEUCZZHL'
       target:
         description: >-
           Build-system target name inside src/targets/
-          (e.g. pa2q-S936U1UEUCZZHL). Must match the directory
-          that contains target.h.
+          (e.g. pa2q-S936U1UEUCZZHL).
         required: false
         default: 'pa2q-S936U1UEUCZZHL'
       auto_trigger_rebuild:
@@ -58,15 +59,14 @@ permissions:
   issues: write
 
 # ---------------------------------------------------------------------------
-# GATE -- decide whether to run and resolve firmware version
+# GATE
 # ---------------------------------------------------------------------------
 jobs:
   gate:
     runs-on: ubuntu-latest
     outputs:
       run:              ${{ steps.decide.outputs.run }}
-      model:            ${{ steps.resolve.outputs.model }}
-      region:           ${{ steps.resolve.outputs.region }}
+      gki_build_id:     ${{ steps.resolve.outputs.gki_build_id }}
       firmware_version: ${{ steps.resolve.outputs.firmware_version }}
       target:           ${{ steps.resolve.outputs.target }}
       auto_trigger:     ${{ steps.resolve.outputs.auto_trigger }}
@@ -86,7 +86,7 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif [ "$EVENT" = "push" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Push trigger fired (registration only) -- skipping real work."
+            echo "Push trigger (registration only) -- skipping real work."
           else
             HAS=$(echo "$ISSUE_LABELS" \
               | jq -r '[.[].name] | index("firmware-fetch") != null')
@@ -98,60 +98,44 @@ jobs:
         id: resolve
         if: steps.decide.outputs.run == 'true'
         env:
-          INPUT_MODEL:   ${{ inputs.model }}
-          INPUT_REGION:  ${{ inputs.region }}
+          INPUT_BID:     ${{ inputs.gki_build_id }}
           INPUT_FW:      ${{ inputs.firmware_version }}
           INPUT_TARGET:  ${{ inputs.target }}
           INPUT_TRIGGER: ${{ inputs.auto_trigger_rebuild }}
           EVENT:         ${{ github.event_name }}
         run: |
           if [ "$EVENT" = "issues" ]; then
-            MODEL="SM-S936U1"
-            REGION="XAA"
-            FW=""
+            BID="15218529"
+            FW="S936U1UEUCZZHL"
             TARGET="pa2q-S936U1UEUCZZHL"
             TRIGGER="true"
           else
-            MODEL="${INPUT_MODEL:-SM-S936U1}"
-            REGION="${INPUT_REGION:-XAA}"
-            FW="${INPUT_FW:-}"
+            BID="${INPUT_BID:-15218529}"
+            FW="${INPUT_FW:-S936U1UEUCZZHL}"
             TARGET="${INPUT_TARGET:-pa2q-S936U1UEUCZZHL}"
             TRIGGER="${INPUT_TRIGGER:-true}"
           fi
 
-          if [ -z "$FW" ]; then
-            echo "No firmware version supplied -- querying FUS for $MODEL / $REGION ..."
-            # Capture stdout only; let stderr print to the log for visibility.
-            # Validate the result looks like a real PDA version string before
-            # accepting it -- this prevents error messages leaking into $FW.
-            FW_RAW=$(python3 "$GITHUB_WORKSPACE/scripts/fus.py" \
-                       latest "$MODEL" "$REGION" 2>/dev/null || true)
-            FW=$(echo "$FW_RAW" | tr -d '[:space:]')
-            if ! echo "$FW" | grep -qE '^[A-Za-z0-9]{10,25}$'; then
-              echo "::error::FUS version query failed or returned unexpected output."
-              echo "::error::Raw output was: ${FW_RAW}"
-              echo "::error::Tip: Samsung's NeoFUS endpoint is neofus.samsungmobile.com -- check network access from the runner."
-              exit 1
-            fi
-            echo "Latest firmware version resolved: $FW"
+          # Sanity-check the build ID is numeric
+          if ! echo "$BID" | grep -qE '^[0-9]+$'; then
+            echo "::error::gki_build_id must be a numeric ci.android.com build ID (got: $BID)"
+            exit 1
           fi
 
-          echo "model=$MODEL"          >> "$GITHUB_OUTPUT"
-          echo "region=$REGION"        >> "$GITHUB_OUTPUT"
-          echo "firmware_version=$FW" >> "$GITHUB_OUTPUT"
-          echo "target=$TARGET"        >> "$GITHUB_OUTPUT"
+          echo "gki_build_id=$BID"      >> "$GITHUB_OUTPUT"
+          echo "firmware_version=$FW"  >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET"         >> "$GITHUB_OUTPUT"
           echo "auto_trigger=$TRIGGER" >> "$GITHUB_OUTPUT"
 
 # ---------------------------------------------------------------------------
-# FETCH -- download AP, extract modules, derive offsets, update target.h
+# FETCH
 # ---------------------------------------------------------------------------
   fetch:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     env:
-      MODEL:  ${{ needs.gate.outputs.model }}
-      REGION: ${{ needs.gate.outputs.region }}
+      BID:    ${{ needs.gate.outputs.gki_build_id }}
       FW:     ${{ needs.gate.outputs.firmware_version }}
       TARGET: ${{ needs.gate.outputs.target }}
     steps:
@@ -160,18 +144,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y lz4 android-sdk-libsparse-utils python3-pip jq
-          pip install --quiet pycryptodome || true
-
-      # fus.py lives in scripts/ -- no heredoc needed
-      - name: Stage FUS client
-        run: cp "$GITHUB_WORKSPACE/scripts/fus.py" /tmp/fus.py
-
-      # -- Step 1: Check whether target.h already matches this firmware -----
-      - name: Check firmware version vs current target.h
+      # -- Step 1: Check if target.h already has this firmware version ------
+      - name: Check current target.h firmware stamp
         id: check
         run: |
           HEADER="src/targets/${TARGET}/target.h"
@@ -179,182 +153,205 @@ jobs:
             echo "::error::target.h not found at $HEADER"
             exit 1
           fi
-          PINNED=$(grep -oP '(?<=FIRMWARE_VERSION\s")[^"]+' "$HEADER" || echo "")
-          echo "Pinned:    ${PINNED:-<none>}"
-          echo "Requested: $FW"
+          PINNED=$(grep -oP '(?<=#define FIRMWARE_VERSION ")[^"]+' "$HEADER" || echo "")
+          echo "Pinned in target.h : ${PINNED:-<none>}"
+          echo "Requested          : $FW"
           if [ "$PINNED" = "$FW" ]; then
-            echo "::notice::target.h already at $FW -- nothing to do."
+            echo "::notice::target.h already stamped with $FW and offsets are set -- nothing to do."
             echo "SKIP=1" >> "$GITHUB_ENV"
           else
             echo "SKIP=0" >> "$GITHUB_ENV"
           fi
 
-      # -- Step 2: Download AP firmware via FUS -----------------------------
-      - name: Download AP firmware (FUS)
+      # -- Step 2: Fetch System.map from ci.android.com --------------------
+      - name: Download System.map from GKI build ${{ needs.gate.outputs.gki_build_id }}
         if: env.SKIP != '1'
         run: |
-          mkdir -p fw_dl
-          python3 /tmp/fus.py download "$MODEL" "$REGION" "$FW" fw_dl
-          echo "=== Downloaded files ==="
-          ls -lh fw_dl/
+          BASE="https://ci.android.com/builds/submitted/${BID}/kernel_aarch64/latest/raw"
+          echo "Fetching System.map from: ${BASE}/System.map"
 
-      # -- Step 3: Extract vendor_dlkm.img from the AP tar ------------------
-      - name: Extract vendor_dlkm.img
-        if: env.SKIP != '1'
-        run: |
-          AP_TAR=$(ls fw_dl/AP_*.tar.md5 fw_dl/AP_*.tar 2>/dev/null | head -1)
-          if [ -z "$AP_TAR" ]; then
-            echo "::error::No AP tar found in fw_dl/"
-            ls fw_dl/
+          HTTP=$(curl -sSL --retry 3 --retry-delay 5 \
+                 -o /tmp/System.map \
+                 -w "%{http_code}" \
+                 "${BASE}/System.map")
+
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::Failed to download System.map (HTTP $HTTP)."
+            echo "::error::URL tried: ${BASE}/System.map"
+            echo "::error::Verify the build ID at https://ci.android.com under aosp_kernel-common-android15-6.6."
             exit 1
           fi
-          echo "AP tar: $AP_TAR"
 
-          ENTRY=$(tar -tf "$AP_TAR" 2>/dev/null | grep vendor_dlkm | head -1)
-          if [ -z "$ENTRY" ]; then
-            echo "::error::vendor_dlkm not found inside $AP_TAR"
-            tar -tf "$AP_TAR" | head -30
-            exit 1
-          fi
-          echo "Extracting: $ENTRY"
-          tar -xf "$AP_TAR" "$ENTRY" -C fw_dl/
+          echo "Downloaded $(wc -l < /tmp/System.map) symbol entries."
+          # Quick sanity: file should start with hex addresses
+          head -3 /tmp/System.map
 
-          BASENAME=$(basename "$ENTRY")
-          if echo "$BASENAME" | grep -q '\.lz4$'; then
-            lz4 -d "fw_dl/$BASENAME" fw_dl/vendor_dlkm.img
-            rm "fw_dl/$BASENAME"
-          else
-            mv "fw_dl/$BASENAME" fw_dl/vendor_dlkm.img
-          fi
-
-          file fw_dl/vendor_dlkm.img
-          if file fw_dl/vendor_dlkm.img | grep -qi 'android sparse'; then
-            simg2img fw_dl/vendor_dlkm.img fw_dl/vendor_dlkm_raw.img
-            mv fw_dl/vendor_dlkm_raw.img fw_dl/vendor_dlkm.img
-          fi
-
-          ls -lh fw_dl/vendor_dlkm.img
-          rm -f "$AP_TAR"
-
-      # -- Step 4: Mount image and dump symbol offsets ----------------------
-      - name: Extract kernel module offsets
+      # -- Step 3: Extract symbol addresses --------------------------------
+      - name: Parse symbols from System.map
         if: env.SKIP != '1'
         run: |
-          mkdir -p mnt_dlkm
-          sudo mount -o loop,ro fw_dl/vendor_dlkm.img mnt_dlkm
-
-          echo "=== All .ko in vendor_dlkm ==="
-          find mnt_dlkm -name "*.ko" | sort | tee /tmp/all_kos.txt
-
-          extract_offsets() {
-            local KO="$1"
-            [ -f "$KO" ] || { echo "::warning::Module not found: $KO"; return; }
-            echo "--- $(basename "$KO") ---"
-            nm --defined-only "$KO" 2>/dev/null \
-              | awk '$2~/[TtDdBb]/ {printf "  %-60s 0x%s\n", $3, $1}' \
-              | sort
+          extract() {
+            local SYM="$1"
+            # System.map format: <addr> <type> <name>
+            # Match exact symbol name (word-boundary) to avoid false hits.
+            grep -m1 -P "\b${SYM}\b" /tmp/System.map \
+              | awk '{print $1}' \
+              | sed 's/^0*//'
           }
 
-          for MOD in \
-            ashmem configfs selinux samsung_q \
-            slsi_wlan exynos_chub mfc_core v4l2_mem2mem; do
-            KO_PATH=$(find mnt_dlkm -name "${MOD}.ko" | head -1)
-            extract_offsets "${KO_PATH}" >> /tmp/module_offsets.txt
+          # Symbols we need for target.h _OFF defines.
+          # Format: DEFINE_NAME:symbol_name
+          SYMBOLS=(
+            "ASHMEM_IOCTL_OFF:ashmem_ioctl"
+            "ASHMEM_COMPAT_IOCTL_OFF:ashmem_compat_ioctl"
+            "ASHMEM_MMAP_OFF:ashmem_mmap"
+            "ASHMEM_OPEN_OFF:ashmem_open"
+            "ASHMEM_RELEASE_OFF:ashmem_release"
+            "ASHMEM_SHOW_FDINFO_OFF:ashmem_show_fdinfo"
+            "ASHMEM_MISC_FOPS_OFF:ashmem_misc_fops"
+            "ASHMEM_FOPS_OFF:ashmem_fops"
+            "CONFIGFS_READ_ITER_OFF:configfs_read_iter"
+            "CONFIGFS_BIN_WRITE_ITER_OFF:configfs_bin_write_iter"
+            "COPY_SPLICE_READ_OFF:copy_splice_read"
+            "NOOP_LLSEEK_OFF:noop_llseek"
+            "INIT_TASK_OFF:init_task"
+            "ROOT_TASK_GROUP_OFF:root_task_group"
+            "SELINUX_ENFORCING_OFF:selinux_enforcing"
+            "KMALLOC_CACHES_OFF:kmalloc_caches"
+            "ANON_PIPE_BUF_OPS_OFF:anon_pipe_buf_ops"
+            "CALL_USERMODEHELPER_EXEC_WORK_OFF:call_usermodehelper_exec_work"
+            "SYSTEM_UNBOUND_WQ_OFF:system_unbound_wq"
+            "SLIDE_NFULNL_LOGGER_OFF:nfulnl_log_packet"
+            "SLIDE_LOGGERS_0_1_OFF:loggers"
+            "SLIDE_RANDOM_BOOT_ID_DATA_OFF:sysctl_bootid"
+            "SLIDE_SYSCTL_BOOTID_OFF:sysctl_bootid"
+            "SLIDE_TRACEFS_WORKER_CALLER_OFF:worker_thread"
+          )
+
+          # System.map gives absolute virtual addresses.
+          # We store relative offsets from KIMAGE_TEXT_BASE (0xffffffc008000000).
+          KIMAGE_TEXT_BASE=0xffffffc008000000
+
+          rm -f /tmp/offsets.env
+          MISSING=()
+
+          for ENTRY in "${SYMBOLS[@]}"; do
+            DEFINE="${ENTRY%%:*}"
+            SYM="${ENTRY##*:}"
+            RAW=$(extract "$SYM")
+            if [ -z "$RAW" ]; then
+              echo "  WARNING: symbol '$SYM' not found in System.map"
+              MISSING+=("$SYM")
+              continue
+            fi
+            ADDR="0x${RAW}"
+            # Compute offset = absolute_addr - KIMAGE_TEXT_BASE
+            OFF=$(python3 -c "print(hex(${ADDR} - ${KIMAGE_TEXT_BASE}))")
+            echo "  ${DEFINE} = ${OFF}   (from ${SYM} @ ${ADDR})"
+            echo "${DEFINE}=${OFF}" >> /tmp/offsets.env
           done
 
-          echo "=== Captured offsets ==="
-          cat /tmp/module_offsets.txt
-          sudo umount mnt_dlkm
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "::warning::${#MISSING[@]} symbol(s) not found in System.map: ${MISSING[*]}"
+            echo "::warning::These _OFF defines will be left at their current placeholder values."
+          fi
 
-      # -- Step 5: Patch target.h -------------------------------------------
-      - name: Update target.h with new offsets
+          echo "=== Parsed offsets ==="
+          cat /tmp/offsets.env
+
+      # -- Step 4: Patch target.h ------------------------------------------
+      - name: Patch target.h
         if: env.SKIP != '1'
         env:
           FIRMWARE_VERSION: ${{ needs.gate.outputs.firmware_version }}
+          GKI_BUILD_ID:     ${{ needs.gate.outputs.gki_build_id }}
         run: |
           python3 - <<'PYEOF'
           import re, os, sys
 
           header_path = "src/targets/{}/target.h".format(os.environ["TARGET"])
           fw_version  = os.environ["FIRMWARE_VERSION"]
+          gki_bid     = os.environ["GKI_BUILD_ID"]
 
           with open(header_path) as f:
               src = f.read()
 
+          # Load offsets written by the parse step
           offsets = {}
-          with open("/tmp/module_offsets.txt") as f:
-              for line in f:
-                  m = re.match(r"\s+(\S+)\s+(0x[0-9a-f]+)", line)
-                  if m:
-                      offsets[m.group(1)] = int(m.group(2), 16)
+          try:
+              with open("/tmp/offsets.env") as f:
+                  for line in f:
+                      line = line.strip()
+                      if '=' in line:
+                          k, v = line.split('=', 1)
+                          offsets[k.strip()] = v.strip()
+          except FileNotFoundError:
+              print("No offsets file found -- nothing to patch.", file=sys.stderr)
+              sys.exit(0)
 
-          SYMBOL_MAP = {
-              "ASHMEM_IOCTL_OFF":            "ashmem_ioctl",
-              "ASHMEM_COMPAT_IOCTL_OFF":     "ashmem_compat_ioctl",
-              "ASHMEM_MMAP_OFF":             "ashmem_mmap",
-              "ASHMEM_MISC_FOPS_OFF":        "ashmem_misc_fops",
-              "CONFIGFS_READ_ITER_OFF":      "configfs_read_iter",
-              "CONFIGFS_BIN_WRITE_ITER_OFF": "configfs_bin_write_iter",
-          }
-
-          def patch_define(src, name, val):
-              pat  = r"(#define\s+{}\s+)(0x[0-9a-fA-F]+|[0-9]+)".format(
+          def patch_define(src, name, hex_val):
+              pat  = r"(#define\s+{}\s+)(0x[0-9a-fA-F]+ULL|0x[0-9a-fA-F]+)".format(
                   re.escape(name))
-              repl = r"\g<1>{:#x}".format(val)
+              repl = r"\g<1>{}ULL".format(hex_val)
               out, n = re.subn(pat, repl, src)
               if n == 0:
-                  print("  WARNING: #define {} not found".format(name),
+                  print("  WARNING: #define {} not found in target.h".format(name),
                         file=sys.stderr)
               return out
 
           changed = []
-          for define, sym in SYMBOL_MAP.items():
-              if sym in offsets:
-                  src = patch_define(src, define, offsets[sym])
-                  changed.append("{} = {:#x}".format(define, offsets[sym]))
-              else:
-                  print("  WARNING: symbol {!r} not found".format(sym),
-                        file=sys.stderr)
+          for define, val in offsets.items():
+              src = patch_define(src, define, val)
+              changed.append("{} = {}".format(define, val))
 
+          # Update FIRMWARE_VERSION string
           src = re.sub(
-              r'(#define\s+FIRMWARE_VERSION\s+")[^"]+"',
-              r'\g<1>' + fw_version + '"',
+              r'(\* Firmware:\s+)\S+',
+              r'\g<1>' + fw_version,
               src,
           )
+          # Also update the GKI build ID comment if present, or add it
+          if 'GKI build' in src:
+              src = re.sub(
+                  r'(\* GKI build\s+)\S+',
+                  r'\g<1>' + gki_bid,
+                  src,
+              )
 
           with open(header_path, "w") as f:
               f.write(src)
 
           if changed:
-              print("Updated defines:")
+              print("Patched {} define(s):".format(len(changed)))
               for c in changed:
                   print("  " + c)
           else:
-              print("No defines updated.")
+              print("No defines were updated.")
           PYEOF
 
           echo "=== Diff ==="
           git diff "src/targets/${TARGET}/target.h" || true
 
-      # -- Step 6: Commit ---------------------------------------------------
+      # -- Step 5: Commit --------------------------------------------------
       - name: Commit updated target.h
         if: env.SKIP != '1'
         env:
           FW:     ${{ needs.gate.outputs.firmware_version }}
+          BID:    ${{ needs.gate.outputs.gki_build_id }}
           TARGET: ${{ needs.gate.outputs.target }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "src/targets/${TARGET}/target.h"
           if git diff --cached --quiet; then
-            echo "::notice::target.h unchanged -- nothing to commit."
+            echo "::notice::target.h unchanged after patching -- nothing to commit."
           else
-            git commit -m "fix(${TARGET}): update kernel offsets for ${FW}"
+            git commit -m "fix(${TARGET}): update kernel offsets for ${FW} (GKI build ${BID})"
             git push origin HEAD:main
           fi
 
 # ---------------------------------------------------------------------------
-# TRIGGER -- open exploit-rebuild issue to kick off rebuild-artifacts
+# TRIGGER
 # ---------------------------------------------------------------------------
   trigger-rebuild:
     needs: [gate, fetch]
@@ -369,10 +366,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET:   ${{ needs.gate.outputs.target }}
           FW:       ${{ needs.gate.outputs.firmware_version }}
+          BID:      ${{ needs.gate.outputs.gki_build_id }}
         run: |
           gh issue create \
             --repo "$GITHUB_REPOSITORY" \
-            --title "rebuild exploit for ${TARGET} (${FW})" \
-            --body "Auto-triggered by fetch-firmware-offsets after committing updated offsets for \`${TARGET}\` at \`${FW}\`." \
+            --title "rebuild exploit for ${TARGET} (${FW})"\
+            --body "Auto-triggered by fetch-firmware-offsets after committing updated offsets for \`${TARGET}\` at \`${FW}\` (GKI build \`${BID}\`)." \
             --label "exploit-rebuild"
           echo "Opened exploit-rebuild issue."
