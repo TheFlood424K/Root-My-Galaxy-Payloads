@@ -23,6 +23,28 @@
         "size": 4083520
       }
     },
+    {
+      "payloadId": "pa3q-S938BXXUCZZHL",
+      "displayName": "Galaxy S25 Ultra One UI 9 Beta 1",
+      "models": [
+        "SM-S938B"
+      ],
+      "kernelVersions": [
+        "6.6.127"
+      ],
+      "exploit": {
+        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/artifacts/pa3q-S938BXXUCZZHL/cve-2026-43499-app.so",
+        "size": 104128
+      },
+      "kernelsu": {
+        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-pa3q-S938BXXUCZZHL-ksunext-v3.3.0",
+        "size": 3994040
+      },
+      "kernelsu-next": {
+        "url": "https://raw.githubusercontent.com/asarr22/Root-My-Galaxy-Payloads/main/kernelsu/ksud-pa3q-S938BXXUCZZHL-ksunext-v3.3.0",
+        "size": 3994040 
+      }
+    },
     {      "payloadId": "galaxy-s25-series-2026-06-07",
       "displayName": "Galaxy S25 series | Kernel 6.6.98",
       "models": [
