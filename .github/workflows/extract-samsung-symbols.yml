@@ -15,6 +15,17 @@
 #   - magiskboot binary cached as a GitHub Actions tool or downloaded
 #     from the Magisk release (handled in the setup step below)
 #
+# Firmware download strategy (Option C -- cache-first)
+#   1. Check for a GitHub Release tagged fw-<VERSION> in this repo.
+#      If one exists and contains an AP tarball asset, download it from
+#      there (fast, no Samsung FUS dependency).
+#   2. Otherwise fall back to fus.py to pull directly from Samsung.
+#      Once downloaded, the AP tarball is uploaded to a new release so
+#      future runs skip FUS entirely.
+#
+# To pre-seed the cache for a firmware version before running this
+# workflow, use the companion cache-firmware.yml workflow (manual trigger).
+#
 # Triggers
 #   workflow_dispatch  -- manual, fires immediately
 #   issues (closed)    -- fires when an issue labelled samsung-symbols
@@ -169,12 +180,6 @@ jobs:
         run: pip3 install --quiet pycryptodome
 
       # -- Step 2: Install magiskboot ----------------------------------------
-      # magiskboot is used to unpack the Samsung boot.img (AOSP v3/v4 format).
-      # We pull the latest Magisk release asset directly from GitHub releases.
-      # GITHUB_TOKEN is passed to avoid unauthenticated rate-limit (60 req/h)
-      # which returns an empty body and leaves MAGISK_URL blank (curl error 3).
-      # A pinned fallback URL for v30.7 is used if the API call fails or
-      # returns no matching asset.
       - name: Install magiskboot
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -193,41 +198,83 @@ jobs:
           fi
           echo "Downloading Magisk from: $MAGISK_URL"
           curl -sSL -o /tmp/magisk.apk "$MAGISK_URL"
-          # magiskboot lives at lib/x86_64/libmagiskboot.so inside the APK
           unzip -p /tmp/magisk.apk lib/x86_64/libmagiskboot.so > /usr/local/bin/magiskboot
           chmod +x /usr/local/bin/magiskboot
           magiskboot --help 2>&1 | head -2 || true
           echo "magiskboot installed."
 
-      # -- Step 3: Download AP firmware via fus.py --------------------------
-      - name: Download AP firmware from Samsung FUS
+      # -- Step 3: Firmware download (cache-first) --------------------------
+      # Check for a release tagged fw-<VERSION>.  If an AP tarball asset
+      # exists there, download it directly.  Otherwise fall back to fus.py
+      # and then upload the result to a new release for future runs.
+      - name: Download AP firmware (cache-first, FUS fallback)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/fw
-          echo "Fetching firmware $FW for $MODEL ($REGION)..."
+          RELEASE_TAG="fw-${FW}"
+          echo "Checking for cached release: $RELEASE_TAG ..."
+
+          # --- Try the cache ---
+          ASSET_URL=$(curl -sSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+            2>/dev/null \
+            | jq -r '.assets[] | select(.name | test("AP_.*\\.tar|ap_.*\\.tar"; "i")) | .browser_download_url' \
+            | head -1 || true)
+
+          if [ -n "$ASSET_URL" ]; then
+            echo "::notice::Cache HIT -- downloading AP tarball from release $RELEASE_TAG"
+            curl -sSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -L -o /tmp/fw/AP_cached.tar \
+              "$ASSET_URL"
+            AP_TAR=/tmp/fw/AP_cached.tar
+            echo "AP_TAR=$AP_TAR" >> "$GITHUB_ENV"
+            echo "Located AP tarball (cached): $AP_TAR  ($(du -sh "$AP_TAR" | cut -f1))"
+            exit 0
+          fi
+
+          # --- Cache MISS: fall back to FUS ---
+          echo "::notice::Cache MISS for $RELEASE_TAG -- fetching from Samsung FUS..."
           python3 scripts/fus.py download "$MODEL" "$REGION" "$FW" /tmp/fw
+
           AP_TAR=$(ls /tmp/fw/AP_*.tar* /tmp/fw/*AP*.tar* 2>/dev/null | head -1 || true)
           if [ -z "$AP_TAR" ]; then
-            # fus.py names the output after the binary filename from FUS;
-            # look for any .tar or .tar.md5 file
             AP_TAR=$(ls /tmp/fw/*.tar* 2>/dev/null | head -1 || true)
           fi
           if [ -z "$AP_TAR" ]; then
-            echo "::error::Could not locate AP tarball in /tmp/fw after download."
+            echo "::error::Could not locate AP tarball in /tmp/fw after FUS download."
             ls -lh /tmp/fw/
             exit 1
           fi
           echo "AP_TAR=$AP_TAR" >> "$GITHUB_ENV"
-          echo "Located AP tarball: $AP_TAR  ($(du -sh "$AP_TAR" | cut -f1))"
+          echo "Located AP tarball (FUS): $AP_TAR  ($(du -sh "$AP_TAR" | cut -f1))"
+
+          # --- Upload to release cache so next run skips FUS ---
+          echo "Uploading AP tarball to release cache ($RELEASE_TAG)..."
+          ASSET_NAME="$(basename "$AP_TAR")"
+
+          # Create the release (idempotent: skip if it already exists)
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Firmware cache: $FW" \
+            --notes "Auto-cached AP tarball for $MODEL $FW ($REGION). Used by extract-samsung-symbols CI to avoid Samsung FUS network blocks." \
+            --prerelease \
+            2>/dev/null || echo "Release $RELEASE_TAG already exists -- skipping create."
+
+          gh release upload "$RELEASE_TAG" "$AP_TAR#${ASSET_NAME}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          echo "Uploaded $ASSET_NAME to release $RELEASE_TAG."
 
       # -- Step 4: Extract boot.img from AP tarball -------------------------
       - name: Extract boot.img from AP tarball
         run: |
           set -euo pipefail
           mkdir -p /tmp/apunpack
-          # Samsung AP tarballs are tar (optionally .lz4-compressed) containing
-          # several image files. boot.img is usually at the top level.
-          # Strip any trailing .md5 extension before passing to tar.
           TARFILE="$AP_TAR"
           if [[ "$TARFILE" == *.md5 ]]; then
             cp "$TARFILE" "${TARFILE%.md5}"
@@ -238,7 +285,6 @@ jobs:
             lz4 -d "$TARFILE" /tmp/ap_raw.tar
             TARFILE=/tmp/ap_raw.tar
           fi
-          # List tar contents; extract only boot.img to save space/time
           echo "Listing tarball contents..."
           tar -tf "$TARFILE" | grep -i boot || true
           tar -C /tmp/apunpack -xf "$TARFILE" boot.img 2>/dev/null \
@@ -257,7 +303,6 @@ jobs:
           cp "$BOOT_IMG" /tmp/bootunpack/boot.img
           cd /tmp/bootunpack
           magiskboot unpack boot.img
-          # magiskboot writes: kernel  ramdisk.cpio  (dtb  second ...)
           if [ ! -f kernel ]; then
             echo "::error::magiskboot did not produce a 'kernel' file."
             ls -lh /tmp/bootunpack/
@@ -267,33 +312,25 @@ jobs:
           echo "KERNEL_COMP=/tmp/bootunpack/kernel" >> "$GITHUB_ENV"
 
       # -- Step 6: Decompress the kernel Image ------------------------------
-      # Samsung kernels are typically LZ4-legacy or GZIP compressed.
-      # magiskboot already decompresses the kernel payload; the output
-      # 'kernel' file should be a raw AArch64 ELF or plain Image.
-      # If it still has a compression header, strip it here.
       - name: Decompress kernel Image if needed
         run: |
           set -euo pipefail
           KFILE="$KERNEL_COMP"
-
-          # Detect compression by magic bytes
           MAGIC=$(xxd -p -l 4 "$KFILE")
           case "$MAGIC" in
-            02214c18|02214c19)  # LZ4 legacy / LZ4 frame
+            02214c18|02214c19)
               echo "LZ4 kernel detected -- decompressing..."
-              lz4 -d "$KFILE" /tmp/kernel_raw || \
-                unlz4 "$KFILE" /tmp/kernel_raw
+              lz4 -d "$KFILE" /tmp/kernel_raw || unlz4 "$KFILE" /tmp/kernel_raw
               ;;
-            1f8b0800|1f8b08*)   # GZIP
+            1f8b0800|1f8b08*)
               echo "GZIP kernel detected -- decompressing..."
               zcat "$KFILE" > /tmp/kernel_raw
               ;;
-            d00dfeed|cefaedfe)  # Mach-O / already uncompressed Image
+            d00dfeed|cefaedfe)
               echo "Kernel appears already decompressed (magic $MAGIC)."
               cp "$KFILE" /tmp/kernel_raw
               ;;
             *)
-              # Try lz4 first, then gzip, then assume raw
               echo "Unknown magic $MAGIC -- attempting LZ4 decompress..."
               if lz4 -d "$KFILE" /tmp/kernel_raw 2>/dev/null; then
                 echo "LZ4 succeeded."
@@ -305,30 +342,10 @@ jobs:
               fi
               ;;
           esac
-
           echo "Raw kernel Image: $(ls -lh /tmp/kernel_raw)"
           echo "KERNEL_RAW=/tmp/kernel_raw" >> "$GITHUB_ENV"
 
       # -- Step 7: Scan kallsyms for Samsung-private symbol addresses --------
-      # Samsung kernels compiled with CONFIG_KALLSYMS=y embed a sorted
-      # name+address table in the .rodata section of the Image.  The
-      # layout is the standard Linux kallsyms format:
-      #   kallsyms_addresses[]  -- u64 absolute VAs
-      #   kallsyms_num_syms     -- u32 count
-      #   kallsyms_names[]      -- compressed name tokens
-      #   kallsyms_markers[]    -- index markers
-      #   kallsyms_token_table  -- Huffman token strings
-      #   kallsyms_token_index  -- u16 offsets into token table
-      #
-      # We use a Python scanner that:
-      #  1. Finds kallsyms_token_table by scanning for the NUL-terminated
-      #     token sequence typical of Linux (starts with short 2-4 byte
-      #     strings like "t\0", "T\0", "st\0", ...).
-      #  2. Walks back to reconstruct the names[] and addresses[] arrays.
-      #  3. Decodes symbol names using the token table.
-      #  4. Returns the absolute VA for each requested symbol name.
-      #
-      # This is the same approach used by extract-vmlinux and kallsyms-finder.
       - name: Scan kallsyms for Samsung-private symbols
         run: |
           set -euo pipefail
@@ -346,20 +363,6 @@ jobs:
           size = len(data)
           print(f"Image size: {size:#x} bytes", flush=True)
 
-          # ----------------------------------------------------------------
-          # 1.  Locate the kallsyms address table.
-          #
-          # Strategy: scan for a long run of 8-byte little-endian values
-          # that all look like kernel VAs (top 32 bits match the expected
-          # kernel address range for AArch64: 0xffffff80xxxxxxxx or
-          # 0xffffffc0xxxxxxxx).  The longest such run is very likely to be
-          # kallsyms_addresses[].
-          #
-          # We accept either PAGE_OFFSET family (0xffffff80) or
-          # KIMAGE_TEXT_BASE family (0xffffffc0) since different sections
-          # of the kernel land in different VA ranges.
-          # ----------------------------------------------------------------
-
           def is_kern_va(v):
               hi = (v >> 32) & 0xffffffff
               return hi in (0xffffff80, 0xffffff81, 0xffffffc0, 0xffffffc1,
@@ -371,7 +374,6 @@ jobs:
           run_start  = -1
           run_len    = 0
 
-          # Scan in 8-byte steps
           for off in range(0, size - 8, ALIGN):
               v = struct.unpack_from("<Q", data, off)[0]
               if is_kern_va(v):
@@ -399,11 +401,6 @@ jobs:
           num_syms  = best_len
           addrs_end = addrs_off + num_syms * 8
 
-          # ----------------------------------------------------------------
-          # 2.  Locate kallsyms_num_syms (u32 immediately after addresses)
-          #     and sanity-check it agrees with our run length.
-          # ----------------------------------------------------------------
-          # Align addrs_end to 4 bytes
           names_search_start = (addrs_end + 3) & ~3
           ns_val = struct.unpack_from("<I", data, names_search_start)[0]
           if abs(ns_val - num_syms) < num_syms * 0.05:
@@ -415,18 +412,7 @@ jobs:
               print(f"::warning::num_syms mismatch ({ns_val} vs {num_syms}); "
                     f"using address-run count.", flush=True)
 
-          # ----------------------------------------------------------------
-          # 3.  Locate kallsyms_token_table.
-          #
-          # The token table is a sequence of 256 NUL-terminated strings
-          # (one per byte value 0x00..0xff) packed end-to-end immediately
-          # after kallsyms_markers.  We locate it by scanning for a region
-          # that starts with short (1-6 char) NUL-terminated strings and
-          # contains exactly 256 of them (or very close to it).
-          # ----------------------------------------------------------------
-
           def count_tokens(off):
-              """Count NUL-terminated tokens starting at off; return (count, end_off)."""
               pos   = off
               count = 0
               while pos < size and count < 300:
@@ -438,12 +424,10 @@ jobs:
               return count, pos
 
           token_table_off = -1
-          # Start search just past the names section (rough upper bound)
-          search_from = names_off + num_syms  # names are at least 1 byte each
-          # Scan for a run of exactly 256 short NUL-terminated strings
+          search_from = names_off + num_syms
           for probe in range(search_from, min(search_from + 0x200000, size - 512), 1):
               if data[probe] == 0:
-                  continue  # skip null bytes
+                  continue
               cnt, end = count_tokens(probe)
               if 250 <= cnt <= 260:
                   token_table_off = probe
@@ -455,7 +439,6 @@ jobs:
               print("::error::Could not locate kallsyms_token_table.", flush=True)
               sys.exit(1)
 
-          # Build the token table: list of 256 byte-strings
           tokens = []
           pos = token_table_off
           for _ in range(256):
@@ -464,20 +447,10 @@ jobs:
                   break
               tokens.append(data[pos:nul])
               pos = nul + 1
-          token_end = pos
 
           print(f"Token sample: {[t.decode(errors='replace') for t in tokens[:8]]}", flush=True)
 
-          # ----------------------------------------------------------------
-          # 4.  Decode symbol names from kallsyms_names[].
-          #
-          # Each entry is: len_byte  token_indices[len_byte]
-          # The first token index encodes the symbol type (t/T/d/D/...).
-          # The decoded name is the concatenation of tokens[1..].
-          # ----------------------------------------------------------------
-
           def decode_names(data, off, count, tokens):
-              """Yield (index, name_str) for count symbols."""
               pos = off
               for i in range(count):
                   if pos >= len(data):
@@ -486,7 +459,6 @@ jobs:
                   if pos + ntoken > len(data):
                       break
                   idxs = data[pos:pos + ntoken]; pos += ntoken
-                  # idxs[0] is the type byte; idxs[1:] are name tokens
                   name = b"".join(tokens[b] for b in idxs[1:])
                   yield i, name.decode(errors="replace")
 
@@ -503,12 +475,10 @@ jobs:
           if len(found) < len(WANT):
               missing = WANT - set(found)
               print(f"::warning::Not found in kallsyms: {missing}", flush=True)
-              # Write partial results -- patcher will leave missing ones as-is
           if not found:
               print("::error::No target symbols found -- aborting.", flush=True)
               sys.exit(1)
 
-          # Write results for the patch step
           with open("/tmp/samsung_offsets.env", "w") as f:
               for sym, (va, off_val) in found.items():
                   define = {
@@ -516,7 +486,6 @@ jobs:
                       "ashmem_fops":      "ASHMEM_FOPS_OFF",
                   }[sym]
                   f.write(f"{define}={hex(off_val)}\n")
-                  # Also emit the absolute VA for use by the fingerprint step
                   f.write(f"VA_{sym}={hex(va)}\n")
 
           print("Wrote /tmp/samsung_offsets.env:", flush=True)
@@ -525,9 +494,6 @@ jobs:
           PYEOF
 
       # -- Step 8: Extract P0 fingerprint words from Image ------------------
-      # For each of the 32 candidate KASLR slides, read 8 x uint16_t words
-      # from Image[PROBE_OFFSET - slide + fingerprint_offset[i]].
-      # The probe offset and slide candidates are taken from target.h.
       - name: Extract P0 fingerprint words
         run: |
           set -euo pipefail
@@ -535,7 +501,7 @@ jobs:
           import struct, os, sys
 
           IMAGE     = os.environ["KERNEL_RAW"]
-          PROBE_OFF = int(os.environ["PROBE"], 16)   # 0x1f0000
+          PROBE_OFF = int(os.environ["PROBE"], 16)
 
           SLIDE_CANDIDATES = [s * 0x10000 for s in range(32)]
           FP_OFFSETS = [0x000, 0x200, 0x400, 0x600, 0x800, 0xa00, 0xc00, 0xe00]
@@ -545,7 +511,7 @@ jobs:
 
           rows = []
           for slide in SLIDE_CANDIDATES:
-              file_base = PROBE_OFF - slide  # byte offset into Image file
+              file_base = PROBE_OFF - slide
               words = []
               valid = True
               for fp_off in FP_OFFSETS:
@@ -555,12 +521,10 @@ jobs:
                       break
                   words.append(struct.unpack_from("<H", data, pos)[0])
               if not valid:
-                  # Out of range for this slide -- use zero sentinel
                   words = [0] * len(FP_OFFSETS)
               rows.append((slide, words))
               print(f"  slide {slide:#08x}: {[hex(w) for w in words]}", flush=True)
 
-          # Serialise as JSON for the patch step
           import json
           with open("/tmp/p0_fingerprints.json", "w") as f:
               json.dump(rows, f)
@@ -608,14 +572,12 @@ jobs:
               src = patch_define(src, define, val)
               changed.append("{} = {}".format(define, val))
 
-          # SLIDE_S928_PROBE_TARGET_IMAGE_OFF must equal ASHMEM_MISC_FOPS_OFF
           if "ASHMEM_MISC_FOPS_OFF" in offsets:
               src = patch_define(src, "SLIDE_S928_PROBE_TARGET_IMAGE_OFF",
                                  offsets["ASHMEM_MISC_FOPS_OFF"])
               changed.append("SLIDE_S928_PROBE_TARGET_IMAGE_OFF = {}".format(
                   offsets["ASHMEM_MISC_FOPS_OFF"]))
 
-          # Strip TODO comments on patched lines
           for define in list(offsets) + ["SLIDE_S928_PROBE_TARGET_IMAGE_OFF"]:
               src = re.sub(
                   r"(#define\s+{}\s+0x[0-9a-fA-F]+ULL)\s*/\*.*?TODO.*?\*/".format(
@@ -643,20 +605,17 @@ jobs:
           fp_path = "src/targets/{}/p0_fingerprint.h".format(os.environ["TARGET"])
 
           with open("/tmp/p0_fingerprints.json") as f:
-              rows = json.load(f)   # list of [slide_int, [w0..w7]]
+              rows = json.load(f)
 
-          # Read the existing file to preserve header boilerplate
           with open(fp_path) as f:
               src = f.read()
 
-          # Regenerate the p0_fingerprints[] array
           def fmt_row(slide, words):
               hex_words = ", ".join("0x{:04x}ULL".format(w) for w in words)
               return "  {{ 0x{:06x}ULL, {{ {} }} }},".format(slide, hex_words)
 
           new_rows = "\n".join(fmt_row(int(s), w) for s, w in rows)
 
-          # Replace the existing array body between { and the final };
           src = re.sub(
               r"(static const struct p0_fingerprint "
               r"p0_fingerprints\[P0_FINGERPRINT_SLIDE_COUNT\]\s*=\s*\{)[^}]+"
@@ -666,8 +625,6 @@ jobs:
               flags=re.DOTALL,
           )
 
-          # Remove the TODO comment at the top of the file now that real
-          # values are present
           src = re.sub(
               r"// TODO: populate words from a rooted.*?(?=\n// Current values)",
               "// Words extracted from GKI Image by extract-samsung-symbols CI.",

@@ -1,0 +1,90 @@
+# cache-firmware.yml
+#
+# Manual workflow to download a Samsung AP tarball from FUS and upload it
+# to a GitHub Release so that extract-samsung-symbols.yml can pull the
+# firmware from the release cache instead of hitting Samsung FUS directly.
+#
+# Run this once per firmware version from a machine / runner that can
+# reach neofus.samsungmobile.com (e.g. your local machine acting as a
+# self-hosted runner, or any network not blocked by Samsung).
+#
+# After this workflow succeeds, extract-samsung-symbols will automatically
+# detect the cached release and skip the FUS download entirely.
+#
+# Permissions: contents:write
+
+name: Cache firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_version:
+        description: 'Samsung firmware version (e.g. S936U1UEUCZZHL)'
+        required: true
+        default: 'S936U1UEUCZZHL'
+      model:
+        description: 'Samsung model number (e.g. SM-S936U1)'
+        required: true
+        default: 'SM-S936U1'
+      region:
+        description: 'Samsung region code (e.g. XAA)'
+        required: true
+        default: 'XAA'
+
+permissions:
+  contents: write
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    env:
+      FW:     ${{ inputs.firmware_version }}
+      MODEL:  ${{ inputs.model }}
+      REGION: ${{ inputs.region }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pycryptodome
+        run: pip3 install --quiet pycryptodome
+
+      - name: Download AP tarball from Samsung FUS
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/fw
+          echo "Fetching $FW for $MODEL ($REGION) from Samsung FUS..."
+          python3 scripts/fus.py download "$MODEL" "$REGION" "$FW" /tmp/fw
+
+          AP_TAR=$(ls /tmp/fw/AP_*.tar* /tmp/fw/*AP*.tar* 2>/dev/null | head -1 || true)
+          if [ -z "$AP_TAR" ]; then
+            AP_TAR=$(ls /tmp/fw/*.tar* 2>/dev/null | head -1 || true)
+          fi
+          if [ -z "$AP_TAR" ]; then
+            echo "::error::Could not locate AP tarball in /tmp/fw after download."
+            ls -lh /tmp/fw/
+            exit 1
+          fi
+          echo "AP_TAR=$AP_TAR" >> "$GITHUB_ENV"
+          echo "Downloaded: $AP_TAR  ($(du -sh "$AP_TAR" | cut -f1))"
+
+      - name: Upload AP tarball to GitHub Release cache
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="fw-${FW}"
+          ASSET_NAME="$(basename "$AP_TAR")"
+
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Firmware cache: $FW" \
+            --notes "AP tarball for $MODEL $FW ($REGION). Pre-seeded for extract-samsung-symbols CI." \
+            --prerelease \
+            2>/dev/null || echo "Release $RELEASE_TAG already exists."
+
+          gh release upload "$RELEASE_TAG" "$AP_TAR#${ASSET_NAME}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          echo "::notice::Uploaded $ASSET_NAME to release $RELEASE_TAG."
+          echo "Future extract-samsung-symbols runs will pull from the cache automatically."
