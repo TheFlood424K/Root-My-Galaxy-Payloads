@@ -1,4 +1,4 @@
-# Fetches the Samsung AP firmware for a target via Samsung FUS (direct HTTP),
+# Fetches the Samsung AP firmware for a target via Samsung NeoFUS (direct HTTP),
 # extracts the vendor_dlkm image, mounts it, reads symbol offsets from the
 # relevant .ko files, and commits the updated target.h back to main so the
 # rebuild-artifacts workflow can consume it.
@@ -7,10 +7,10 @@
 # pycryptodome is installed at runtime and used only for .enc4/.enc2 decrypt.
 #
 # Triggers
-#   workflow_dispatch  — manual run, one target at a time
-#   push               — workflow file change only; fires once to register the
-#                        workflow in the Actions UI, then skips all real work
-#   issues (closed)    — firmware-fetch label fires for the default target
+#   workflow_dispatch  -- manual run, one target at a time
+#   push               -- workflow file change only; fires once to register the
+#                         workflow in the Actions UI, then skips all real work
+#   issues (closed)    -- firmware-fetch label fires for the default target
 #
 # Secrets required : none (Samsung FUS is unauthenticated for latest firmware)
 # Permissions      : contents:write  issues:write
@@ -29,13 +29,13 @@ on:
         required: false
         default: 'XAA'
       firmware_version:
-        description: >
+        description: >-
           Full PDA/firmware version string (e.g. S936U1UESCCZF9).
           Leave blank to fetch the latest available version.
         required: false
         default: ''
       target:
-        description: >
+        description: >-
           Build-system target name inside src/targets/
           (e.g. pa2q-S936U1UEUCZZHL). Must match the directory
           that contains target.h.
@@ -58,7 +58,7 @@ permissions:
   issues: write
 
 # ---------------------------------------------------------------------------
-# GATE — decide whether to run and resolve firmware version
+# GATE -- decide whether to run and resolve firmware version
 # ---------------------------------------------------------------------------
 jobs:
   gate:
@@ -86,12 +86,12 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif [ "$EVENT" = "push" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Push trigger fired (registration only) — skipping real work."
+            echo "Push trigger fired (registration only) -- skipping real work."
           else
             HAS=$(echo "$ISSUE_LABELS" \
               | jq -r '[.[].name] | index("firmware-fetch") != null')
             echo "run=$HAS" >> "$GITHUB_OUTPUT"
-            [ "$HAS" != "true" ] && echo "No firmware-fetch label — skipping."
+            [ "$HAS" != "true" ] && echo "No firmware-fetch label -- skipping."
           fi
 
       - name: Resolve parameters
@@ -120,15 +120,20 @@ jobs:
           fi
 
           if [ -z "$FW" ]; then
-            echo "No firmware version supplied — querying FUS for $MODEL/$REGION..."
-            FW=$(python3 "$GITHUB_WORKSPACE/scripts/fus.py" \
-                   latest "$MODEL" "$REGION" 2>&1 | tail -1 || echo "")
+            echo "No firmware version supplied -- querying FUS for $MODEL / $REGION ..."
+            # Capture stdout only; let stderr print to the log for visibility.
+            # Validate the result looks like a real PDA version string before
+            # accepting it -- this prevents error messages leaking into $FW.
+            FW_RAW=$(python3 "$GITHUB_WORKSPACE/scripts/fus.py" \
+                       latest "$MODEL" "$REGION" 2>/dev/null || true)
+            FW=$(echo "$FW_RAW" | tr -d '[:space:]')
+            if ! echo "$FW" | grep -qE '^[A-Za-z0-9]{10,25}$'; then
+              echo "::error::FUS version query failed or returned unexpected output."
+              echo "::error::Raw output was: ${FW_RAW}"
+              echo "::error::Tip: Samsung's NeoFUS endpoint is neofus.samsungmobile.com -- check network access from the runner."
+              exit 1
+            fi
             echo "Latest firmware version resolved: $FW"
-          fi
-
-          if [ -z "$FW" ]; then
-            echo "::error::Could not resolve firmware version for $MODEL/$REGION"
-            exit 1
           fi
 
           echo "model=$MODEL"          >> "$GITHUB_OUTPUT"
@@ -138,7 +143,7 @@ jobs:
           echo "auto_trigger=$TRIGGER" >> "$GITHUB_OUTPUT"
 
 # ---------------------------------------------------------------------------
-# FETCH — download AP, extract modules, derive offsets, update target.h
+# FETCH -- download AP, extract modules, derive offsets, update target.h
 # ---------------------------------------------------------------------------
   fetch:
     needs: gate
@@ -161,11 +166,11 @@ jobs:
           sudo apt-get install -y lz4 android-sdk-libsparse-utils python3-pip jq
           pip install --quiet pycryptodome || true
 
-      # fus.py lives in scripts/ — no heredoc needed
+      # fus.py lives in scripts/ -- no heredoc needed
       - name: Stage FUS client
         run: cp "$GITHUB_WORKSPACE/scripts/fus.py" /tmp/fus.py
 
-      # ── Step 1: Check whether target.h already matches this firmware ────
+      # -- Step 1: Check whether target.h already matches this firmware -----
       - name: Check firmware version vs current target.h
         id: check
         run: |
@@ -178,13 +183,13 @@ jobs:
           echo "Pinned:    ${PINNED:-<none>}"
           echo "Requested: $FW"
           if [ "$PINNED" = "$FW" ]; then
-            echo "::notice::target.h already at $FW — nothing to do."
+            echo "::notice::target.h already at $FW -- nothing to do."
             echo "SKIP=1" >> "$GITHUB_ENV"
           else
             echo "SKIP=0" >> "$GITHUB_ENV"
           fi
 
-      # ── Step 2: Download AP firmware via FUS ────────────────────────────
+      # -- Step 2: Download AP firmware via FUS -----------------------------
       - name: Download AP firmware (FUS)
         if: env.SKIP != '1'
         run: |
@@ -193,7 +198,7 @@ jobs:
           echo "=== Downloaded files ==="
           ls -lh fw_dl/
 
-      # ── Step 3: Extract vendor_dlkm.img from the AP tar ─────────────────
+      # -- Step 3: Extract vendor_dlkm.img from the AP tar ------------------
       - name: Extract vendor_dlkm.img
         if: env.SKIP != '1'
         run: |
@@ -231,7 +236,7 @@ jobs:
           ls -lh fw_dl/vendor_dlkm.img
           rm -f "$AP_TAR"
 
-      # ── Step 4: Mount image and dump symbol offsets ──────────────────────
+      # -- Step 4: Mount image and dump symbol offsets ----------------------
       - name: Extract kernel module offsets
         if: env.SKIP != '1'
         run: |
@@ -261,7 +266,7 @@ jobs:
           cat /tmp/module_offsets.txt
           sudo umount mnt_dlkm
 
-      # ── Step 5: Patch target.h ───────────────────────────────────────────
+      # -- Step 5: Patch target.h -------------------------------------------
       - name: Update target.h with new offsets
         if: env.SKIP != '1'
         env:
@@ -331,7 +336,7 @@ jobs:
           echo "=== Diff ==="
           git diff "src/targets/${TARGET}/target.h" || true
 
-      # ── Step 6: Commit ───────────────────────────────────────────────────
+      # -- Step 6: Commit ---------------------------------------------------
       - name: Commit updated target.h
         if: env.SKIP != '1'
         env:
@@ -342,14 +347,14 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "src/targets/${TARGET}/target.h"
           if git diff --cached --quiet; then
-            echo "::notice::target.h unchanged — nothing to commit."
+            echo "::notice::target.h unchanged -- nothing to commit."
           else
             git commit -m "fix(${TARGET}): update kernel offsets for ${FW}"
             git push origin HEAD:main
           fi
 
 # ---------------------------------------------------------------------------
-# TRIGGER — open exploit-rebuild issue to kick off rebuild-artifacts
+# TRIGGER -- open exploit-rebuild issue to kick off rebuild-artifacts
 # ---------------------------------------------------------------------------
   trigger-rebuild:
     needs: [gate, fetch]

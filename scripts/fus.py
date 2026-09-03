@@ -1,9 +1,9 @@
 """Samsung FUS (Firmware Update Service) client.
 
-Downloads AP firmware packages from Samsung's cloud-neofus endpoint
-using only Python stdlib (urllib, hashlib, hmac, base64, xml.etree).
-No third-party packages required for the network/auth layer; pycryptodome
-is imported lazily and only when decrypting .enc4 / .enc2 packages.
+Downloads AP firmware packages from Samsung's NeoFUS endpoint using only
+Python stdlib (urllib, hashlib, hmac, base64). No third-party packages
+are required for the network/auth layer; pycryptodome is imported lazily
+and only when decrypting .enc4 / .enc2 packages.
 
 CLI usage
 ---------
@@ -21,7 +21,10 @@ import sys
 import urllib.parse
 import urllib.request
 
-FUS_HOST = "https://cloud-neofus.samsungmobile.com"
+# Samsung migrated the NeoFUS API to neofus.samsungmobile.com.
+# The old cloud-neofus.samsungmobile.com hostname no longer resolves
+# reliably from CI runners as of mid-2026.
+FUS_HOST = "https://neofus.samsungmobile.com"
 USER_AGENT = (
     "Dalvik/2.1.0 (Linux; U; Android 12; SM-G991B Build/SP1A.210812.016)"
 )
@@ -86,7 +89,7 @@ def get_nonce() -> str:
         nonce = _xml(resp, "NONCE")
     if not nonce:
         raise RuntimeError(
-            "Could not obtain FUS nonce — Samsung may have changed their API"
+            "Could not obtain FUS nonce -- Samsung may have changed their API"
         )
     return nonce
 
@@ -169,9 +172,7 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
     )
 
     print(
-        "Downloading {}  ({} MB)...".format(
-            fname, filesize // 1024 // 1024
-        ),
+        "Downloading {}  ({} MB)...".format(fname, filesize // 1024 // 1024),
         flush=True,
     )
 
@@ -192,11 +193,7 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
         "<LOGIC_CHECK><Data></Data></LOGIC_CHECK>"
         "</Put></FUSBody></FUSMsg>"
     ).format(
-        model=model,
-        region=region,
-        version=version,
-        fname=fname,
-        fpath=fpath,
+        model=model, region=region, version=version, fname=fname, fpath=fpath
     )
     _post("/NF_DownloadBinaryInitForMass.do", init_body, auth)
 
@@ -209,9 +206,7 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
     chunk = 1 << 20
     downloaded = 0
     last_pct = -1
-    with urllib.request.urlopen(req, timeout=600) as r, open(
-        enc_path, "wb"
-    ) as f:
+    with urllib.request.urlopen(req, timeout=600) as r, open(enc_path, "wb") as f:
         while True:
             buf = r.read(chunk)
             if not buf:
@@ -234,7 +229,6 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
 
     if fname.endswith(".enc4"):
         from Crypto.Cipher import AES  # pycryptodome
-
         key = (
             hashlib.md5(version[-16:].encode()).digest()
             + hashlib.md5(version[:16].encode()).digest()
@@ -249,7 +243,6 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
 
     elif fname.endswith(".enc2"):
         from Crypto.Cipher import AES  # pycryptodome
-
         KEY = bytes(range(32))
         with open(enc_path, "rb") as f:
             data = f.read()
