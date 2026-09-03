@@ -1,9 +1,16 @@
 """Samsung FUS (Firmware Update Service) client.
 
 Downloads AP firmware packages from Samsung's NeoFUS endpoint using only
-Python stdlib (urllib, hashlib, hmac, base64). No third-party packages
-are required for the network/auth layer; pycryptodome is imported lazily
-and only when decrypting .enc4 / .enc2 packages.
+Python stdlib + curl_cffi for TLS impersonation.
+
+Samsung's NeoFUS server performs TLS ClientHello fingerprinting and sends
+a TCP RST (WinError 10054 on Windows, ECONNRESET on Linux) for connections
+that don't look like a real browser or Android device.  curl_cffi wraps
+libcurl compiled with BoringSSL and impersonates a Chrome TLS fingerprint,
+bypassing the block.
+
+Dependencies
+  pip install curl_cffi pycryptodome
 
 CLI usage
 ---------
@@ -19,13 +26,17 @@ import os
 import re
 import sys
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
-# Samsung migrated the NeoFUS API to neofus.samsungmobile.com.
-# The old cloud-neofus.samsungmobile.com hostname no longer resolves
-# reliably from CI runners as of mid-2026.
+try:
+    from curl_cffi import requests as _creq
+    _SESSION = _creq.Session(impersonate="chrome120")
+    _USE_CURL_CFFI = True
+except ImportError:
+    _USE_CURL_CFFI = False
+    import urllib.error
+    import urllib.request
+
 FUS_HOST = "https://neofus.samsungmobile.com"
 USER_AGENT = (
     "Dalvik/2.1.0 (Linux; U; Android 12; SM-G991B Build/SP1A.210812.016)"
@@ -34,9 +45,8 @@ USER_AGENT = (
 _K1 = "vicopx7dqu06em2f"
 _K2 = "waxd789d2eonk84g"
 
-# Retry settings for transient network errors (timeouts, connection resets)
 _MAX_RETRIES = 3
-_RETRY_BACKOFF = [5, 15, 30]   # seconds to wait before attempt 2, 3, 4
+_RETRY_BACKOFF = [5, 15, 30]
 
 
 # ---------------------------------------------------------------------------
@@ -61,12 +71,18 @@ def _getauth(nonce: str) -> str:
 
 
 def _post(path: str, body: str, auth: str = "", timeout: int = 60) -> tuple[str, str]:
+    """POST XML body to FUS, return (response_text, nonce_header).
+
+    Uses curl_cffi (Chrome TLS impersonation) when available;
+    falls back to stdlib urllib otherwise.
+    """
     url = FUS_HOST + path
-    req = urllib.request.Request(url, data=body.encode(), method="POST")
-    req.add_header("Content-Type", "application/xml")
-    req.add_header("User-Agent", USER_AGENT)
+    headers = {
+        "Content-Type": "application/xml",
+        "User-Agent": USER_AGENT,
+    }
     if auth:
-        req.add_header("Authorization", auth)
+        headers["Authorization"] = auth
 
     last_exc: Exception = RuntimeError("No attempts made")
     for attempt in range(_MAX_RETRIES):
@@ -80,11 +96,27 @@ def _post(path: str, body: str, auth: str = "", timeout: int = 60) -> tuple[str,
             )
             time.sleep(wait)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                nonce = r.getheader("NONCE", "")
-                text = r.read().decode(errors="replace")
+            if _USE_CURL_CFFI:
+                r = _SESSION.post(
+                    url,
+                    content=body.encode(),
+                    headers=headers,
+                    timeout=timeout,
+                )
+                r.raise_for_status()
+                nonce = r.headers.get("NONCE", "")
+                text = r.text
+            else:
+                req = urllib.request.Request(
+                    url, data=body.encode(), method="POST"
+                )
+                for k, v in headers.items():
+                    req.add_header(k, v)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    nonce = resp.getheader("NONCE", "")
+                    text = resp.read().decode(errors="replace")
             return text, nonce
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except Exception as exc:
             last_exc = exc
             print("  [fus] attempt {} failed: {}".format(attempt + 1, exc), flush=True)
 
@@ -93,6 +125,69 @@ def _post(path: str, body: str, auth: str = "", timeout: int = 60) -> tuple[str,
             path, _MAX_RETRIES, last_exc
         )
     )
+
+
+def _stream_get(url: str, auth: str, out_path: str, filesize: int) -> None:
+    """Streaming GET for the large binary download.
+
+    Uses curl_cffi session when available for the same TLS impersonation;
+    falls back to urllib for the binary stream.
+    """
+    headers = {
+        "Authorization": auth,
+        "User-Agent": USER_AGENT,
+    }
+    chunk = 1 << 20
+    downloaded = 0
+    last_pct = -1
+
+    if _USE_CURL_CFFI:
+        with _SESSION.stream(
+            "GET", url, headers=headers, timeout=600
+        ) as r:
+            r.raise_for_status()
+            with open(out_path, "wb") as f:
+                for buf in r.iter_content(chunk_size=chunk):
+                    if not buf:
+                        break
+                    f.write(buf)
+                    downloaded += len(buf)
+                    if filesize:
+                        pct = downloaded * 100 // filesize
+                        if pct != last_pct and pct % 10 == 0:
+                            print(
+                                "  {}%  ({}/{} MB)".format(
+                                    pct,
+                                    downloaded // 1024 // 1024,
+                                    filesize // 1024 // 1024,
+                                ),
+                                flush=True,
+                            )
+                            last_pct = pct
+    else:
+        import urllib.request as _ur
+        req = _ur.Request(url)
+        for k, v in headers.items():
+            req.add_header(k, v)
+        with _ur.urlopen(req, timeout=600) as r, open(out_path, "wb") as f:
+            while True:
+                buf = r.read(chunk)
+                if not buf:
+                    break
+                f.write(buf)
+                downloaded += len(buf)
+                if filesize:
+                    pct = downloaded * 100 // filesize
+                    if pct != last_pct and pct % 10 == 0:
+                        print(
+                            "  {}%  ({}/{} MB)".format(
+                                pct,
+                                downloaded // 1024 // 1024,
+                                filesize // 1024 // 1024,
+                            ),
+                            flush=True,
+                        )
+                        last_pct = pct
 
 
 def _xml(text: str, tag: str) -> str:
@@ -158,7 +253,7 @@ def get_binary_info(model: str, region: str, version: str) -> dict:
         "<FUSBody><Put>"
         "<ACCESS_MODE><Data>2</Data></ACCESS_MODE>"
         "<BINARY_NATURE><Data>1</Data></BINARY_NATURE>"
-        "<CLIENT_PRODUCT><Data>Smart Switch</Data></CLIENT_PRODUCT>"
+        "<CLIENT_PRODUCT><Data>Smart Switch</Data></Client_PRODUCT>"
         "<DEVICE_MODEL_BLUETOOTH><Data>{model}</Data></DEVICE_MODEL_BLUETOOTH>"
         "<DEVICE_MODEL_TYPE><Data>1</Data></DEVICE_MODEL_TYPE>"
         "<DEVICE_LOCAL_CODE><Data>{region}</Data></DEVICE_LOCAL_CODE>"
@@ -228,35 +323,11 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
     dl_url = FUS_HOST + "/NF_DownloadBinaryForMass.do?" + urllib.parse.urlencode(
         {"file": fpath + fname}
     )
-    req = urllib.request.Request(dl_url)
-    req.add_header("Authorization", auth)
-    req.add_header("User-Agent", USER_AGENT)
-    chunk = 1 << 20
-    downloaded = 0
-    last_pct = -1
-    with urllib.request.urlopen(req, timeout=600) as r, open(enc_path, "wb") as f:
-        while True:
-            buf = r.read(chunk)
-            if not buf:
-                break
-            f.write(buf)
-            downloaded += len(buf)
-            if filesize:
-                pct = downloaded * 100 // filesize
-                if pct != last_pct and pct % 10 == 0:
-                    print(
-                        "  {}%  ({}/{} MB)".format(
-                            pct,
-                            downloaded // 1024 // 1024,
-                            filesize // 1024 // 1024,
-                        ),
-                        flush=True,
-                    )
-                    last_pct = pct
+    _stream_get(dl_url, auth, enc_path, filesize)
     print("Download complete: " + enc_path, flush=True)
 
     if fname.endswith(".enc4"):
-        from Crypto.Cipher import AES  # pycryptodome
+        from Crypto.Cipher import AES
         key = (
             hashlib.md5(version[-16:].encode()).digest()
             + hashlib.md5(version[:16].encode()).digest()
@@ -270,7 +341,7 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
         print("Decrypted enc4 -> " + out_path, flush=True)
 
     elif fname.endswith(".enc2"):
-        from Crypto.Cipher import AES  # pycryptodome
+        from Crypto.Cipher import AES
         KEY = bytes(range(32))
         with open(enc_path, "rb") as f:
             data = f.read()
@@ -287,12 +358,18 @@ def download_ap(model: str, region: str, version: str, outdir: str) -> str:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    if not _USE_CURL_CFFI:
+        print(
+            "[fus] WARNING: curl_cffi not installed. "
+            "Samsung may reject connections due to TLS fingerprinting.\n"
+            "  Install with: pip install curl_cffi",
+            file=sys.stderr,
+        )
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "latest" and len(sys.argv) == 4:
         _model, _region = sys.argv[2], sys.argv[3]
         print(get_latest_version(_model, _region))
     elif cmd == "download" and len(sys.argv) == 6:
-        # sys.argv: [fus.py, "download", MODEL, REGION, VERSION, OUTDIR]
         _, _, _model, _region, _version, _outdir = sys.argv
         download_ap(_model, _region, _version, _outdir)
     else:
