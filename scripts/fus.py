@@ -263,7 +263,8 @@ if __name__ == "__main__":
     if cmd == "latest" and len(sys.argv) == 4:
         _model, _region = sys.argv[2], sys.argv[3]
         print(get_latest_version(_model, _region))
-    elif cmd == "download" and len(sys.argv) == 7:
+    elif cmd == "download" and len(sys.argv) == 6:
+        # sys.argv: [fus.py, "download", MODEL, REGION, VERSION, OUTDIR]
         _, _, _model, _region, _version, _outdir = sys.argv
         download_ap(_model, _region, _version, _outdir)
     else:
